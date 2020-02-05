@@ -12,8 +12,8 @@ Use of this source code is governed by a BSD-style
 license that can be found in the LICENSE file.
 
 # /ws/control
-Allow browser to control the relay with JSON over a websocket
-when the connection closes, clean up all of the child connections.
+Allow browser to control the relay over a websocket using a very simple binary protocol.
+When the connection closes, clean up all of the child connections.
 In this websocket connection, the client and server exchange these commands
 messages, with the first byte of each message identifying the command.
 

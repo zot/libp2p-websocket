@@ -2,14 +2,14 @@
 
 Relay p2p connections between browsers transcoding between sockets and websockets
 
+This runs a simple websocket server and listens for websocket connections using a simple protocol:
+
 ## NOTE: THIS IS A WORK IN PROGRESS
 
 # LICENSE AND COPYRIGHT
 Copyright 2020 Bill Burdick. All rights reserved.
 Use of this source code is governed by a BSD-style
 license that can be found in the LICENSE file.
-
-This runs a simple websocket server and listens for websocket connections using a simple protocol:
 
 # /ws/control
 Allow browser to control the relay with JSON over a websocket

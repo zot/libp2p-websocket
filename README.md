@@ -13,9 +13,8 @@ license that can be found in the LICENSE file.
 
 # /ws/control
 Allow browser to control the relay over a websocket using a very simple binary protocol.
-When the connection closes, clean up all of the child connections.
-In this websocket connection, the client and server exchange these commands
-messages, with the first byte of each message identifying the command.
+When a connection closes, clean up all of its child connections.
+The client and server exchange these command messages, with the first byte of each message identifying the command.
 
 # CLIENT-TO-SERVER MESSAGES
  

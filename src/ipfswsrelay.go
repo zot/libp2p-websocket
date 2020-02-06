@@ -41,30 +41,28 @@ messages, with the first byte of each message identifying the command.
 */
 
 import (
+	"encoding/binary"
 	"flag"
-	"strconv"
+	"fmt"
 	"github.com/gorilla/websocket"
 	"log"
-	"net/http"
 	"net"
-	"path/filepath"
-	"fmt"
-	"encoding/binary"
+	"net/http"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 )
 
-type clientMessage byte
+type messageType byte
 const (
-	cmsgListen clientMessage = iota + 1
+	cmsgListen messageType = iota + 1
 	cmsgStop
 	cmsgClose
 	cmsgData
 	cmsgConnect
-)
-
-type serverMessage byte
-const (
-	smsgNewConnection serverMessage = iota + 1
+	smsgIdent messageType = iota - cmsgConnect
+	smsgNewConnection
 	smsgConnectionClosed
 	smsgData
 	smsgListenRefused
@@ -79,6 +77,7 @@ const (
 )
 
 var ipfsPath string
+var peerId string
 
 var (
 	upgrader = websocket.Upgrader{
@@ -133,8 +132,8 @@ func svc(s chanSvc, code func()) {
 func runSvc(s chanSvc) {
 	go func() {
 		for {
-			cmd, closed := <- s.getSvcChannel()
-			if closed {
+			cmd, ok := <- s.getSvcChannel()
+			if !ok {
 				break
 			}
 			cmd()
@@ -148,6 +147,12 @@ func (f *forwarder) close() {
 		f.connection = nil
 		delete(f.client.forwarders, f.id)
 	}
+}
+
+func createListener() *listener {
+	l := new(listener)
+	l.connections = make(map[uint64]*net.TCPConn)
+	return l
 }
 
 // process connections as they come in
@@ -177,7 +182,7 @@ func (l *listener) close() {
 		l.closeConnection(id)
 	}
 	exec.Command(ipfsPath, "p2p", "close", "-l", strconv.Itoa(l.port)).Run()
-	l.client.writeMessage(byte(smsgListenerClosed), []byte(l.protocol))
+	l.client.writeMessage(smsgListenerClosed, []byte(l.protocol))
 	delete(l.client.listeners, l.protocol)
 }
 
@@ -185,6 +190,15 @@ func (l *listener) closeConnection(id uint64) {
 	l.connections[id].Close()
 	delete(l.connections, id)
 	delete(l.client.listenerConnections, id)
+}
+
+func createClient() *client {
+	c := new(client)
+	c.listeners = make(map[string]*listener)
+	c.listenerConnections = make(map[uint64]*listener)
+	c.forwarders = make(map[uint64]*forwarder)
+	c.managementChan = make(chan func())
+	return c
 }
 
 func (c *client) getSvcChannel() chan func() {
@@ -234,7 +248,7 @@ func (c *client) readWebsocket() {
 		_, data, err := c.control.ReadMessage()
 		svc(c, func() {
 			if err == nil && len(data) > 0 {
-				switch clientMessage(data[0]) {
+				switch messageType(data[0]) {
 				case cmsgListen: c.listen(string(data[1:]))
 				case cmsgStop: c.stopListener(string(data[1:]))
 				case cmsgClose: c.closeStream(binary.BigEndian.Uint64(data[1:9]))
@@ -270,11 +284,12 @@ func (c *client) listen(protocol string) {
 	}
 	err = exec.Command(ipfsPath, "p2p", "listen", protocol, "/ipv4/127.0.0.1/tcp/"+strconv.Itoa(port)).Run()
 	if err != nil {
-		c.writePortMessage(byte(smsgListenRefused), port)
+		c.writePortMessage(smsgListenRefused, port)
 		lisnr.Close()
 	} else {
-		lis := new(listener)
-		*lis = listener{port: port, listener: lisnr}
+		lis := createListener()
+		lis.port = port
+		lis.listener = lisnr
 		c.listeners[protocol] = lis
 		lis.run(c)
 	}
@@ -327,21 +342,18 @@ func (c *client) sendData(id uint64, data []byte) {
 func (c *client) connect(protocol string, peerid string) {
 	var con *net.TCPConn
 	port := choosePort()
-	if port == -1 {
-		log.Fatal("NO MORE PORTS!")
-	}
 	err := exec.Command(ipfsPath, "p2p", "forward", protocol, "/ipv4/127.0.0.1/tcp/"+strconv.Itoa(port), peerid).Run()
 	if err == nil {
 		con, err = net.DialTCP("tcp4", &net.TCPAddr{Port: port}, nil)
 	}
 	if err != nil {
-		c.writeMessage(byte(smsgPeerConnectionRefused), []byte(fmt.Sprintf("Could not create connection to %v", peerid)))
+		c.writeMessage(smsgPeerConnectionRefused, []byte(fmt.Sprintf("Could not create connection to %v", peerid)))
 	} else {
 		id := c.newConnectionID()
 		fwd := new(forwarder)
 		*fwd = forwarder{port, id,con, c}
 		c.forwarders[id] = fwd
-		c.writeIDMessage(byte(smsgPeerConnection), id)
+		c.writeIDMessage(smsgPeerConnection, id)
 		c.readSocket(id, con)
 	}
 }
@@ -369,22 +381,22 @@ func getString(data []byte) (string, []byte) {
 	return string(data[2:2+len]), data[2+len:]
 }
 
-func (c *client) writeIDMessage(typ byte, id uint64) error {
-	msg := [9]byte{typ}
+func (c *client) writeIDMessage(typ messageType, id uint64) error {
+	msg := [9]byte{byte(typ)}
 	binary.BigEndian.PutUint64(msg[1:], id)
 	return c.writeFullMessage(msg[:])
 }
 
-func (c *client) writePortMessage(typ byte, port int) error {
-	msg := [5]byte{typ}
+func (c *client) writePortMessage(typ messageType, port int) error {
+	msg := [5]byte{byte(typ)}
 	binary.BigEndian.PutUint32(msg[1:], uint32(port))
 	return c.writeFullMessage(msg[:])
 }
 
-func (c *client) writeMessage(typ byte, body []byte) error {
+func (c *client) writeMessage(typ messageType, body []byte) error {
 	msg := make([]byte, len(body) + 1)
-	msg[0] = typ
-	copy(body, msg[1:])
+	msg[0] = byte(typ)
+	copy(msg[1:], body)
 	return c.writeFullMessage(msg)
 }
 
@@ -394,6 +406,13 @@ func (c *client) writeFullMessage(msg []byte) error {
 		c.close()
 	}
 	return werr
+}
+
+func createRelay() *relay {
+	r := new(relay)
+	r.clients = make(map[*websocket.Conn]*client)
+	r.managementChan = make(chan func())
+	return r
 }
 
 func (r *relay) getSvcChannel() chan func() {
@@ -411,9 +430,10 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 			log.Printf("error: %v", err)
 		} else {
 			svc(r, func() {
-				client := new(client)
+				client := createClient()
 				client.control = con
 				r.clients[con] = client
+				client.writeMessage(smsgIdent, []byte(peerId))
 				runSvc(client)
 				client.readWebsocket()
 			})
@@ -421,13 +441,14 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 	}
 }
 
-//func runCmd(args ...string) {
-//    if cmd, e := exec.Command(args) {
-//		stderrStdout ****
-//        b, _ := ioutil.ReadAll(cmd.Stdout)
-//        println("output: " + string(b))
-//    }
-//}
+func runIpfsCmd(args ...string) string {
+    cmd := exec.Command(ipfsPath, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Fatalf("Error running ipfs %#v\n%v\n", args, err)
+	}
+	return string(output)
+}
 
 func main() {
 	path, err := exec.LookPath("ipfs")
@@ -435,37 +456,32 @@ func main() {
 		log.Fatal(err)
 	}
 	ipfsPath = path
-	err = exec.Command(ipfsPath, "id", "-f", "<id>\n").Run()
-	relay := new(relay)
+	peerId = strings.Trim(runIpfsCmd("id", "-f", "<id>\n"), " \n")
+	relay := createRelay()
 	runSvc(relay)
 	port := 8888
 	files := ""
 	flag.StringVar(&files, "files", "", "optional directory to use for file serving")
+	flag.IntVar(&port, "port", 8888, "port to listen on")
 	flag.Parse()
+	fmt.Printf("Peer id: %v\nListening on port %v\n", peerId, port)
+	http.HandleFunc("/ipfswsrelay", relay.handleConnection())
 	if files != "" {
 		f, err := filepath.Abs(files)
 		if err != nil {
 			log.Fatal(err)
 		}
 		files = f
-	}
-	if len(flag.Args()) > 0 {
-		p, err := strconv.Atoi(flag.Arg(0))
-		if err != nil {
-			log.Fatal(err)
+		if files != "" {
+			http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				reqFile, err := filepath.Abs(filepath.Join(files, r.URL.Path))
+				if err != nil || len(reqFile) < len(files) || files[:] != reqFile[0:len(files)] {
+					http.Error(w, "Not found", http.StatusNotFound)
+				} else {
+					http.ServeFile(w, r, reqFile)
+				}
+			})
 		}
-		port = p
 	}
-	if files != "" {
-		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			reqFile, err := filepath.Abs(filepath.Join(files, r.URL.Path))
-			if err != nil || len(reqFile) < len(files) || files[:] != reqFile[0:len(files)] {
-				http.Error(w, "Not found", http.StatusNotFound)
-			} else {
-				http.ServeFile(w, r, reqFile)
-			}
-		})
-	}
-	http.HandleFunc("/ws", relay.handleConnection())
 	log.Fatal(http.ListenAndServe(fmt.Sprintf("localhost:%d", port), nil))
 }

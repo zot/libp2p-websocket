@@ -1,0 +1,14 @@
+{
+  "name": "p2pmud2",
+  "version": "1.0.0",
+  "description": "Basic peer-to-peer MUD",
+  "main": "p2pmud.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Bill Burdick",
+  "license": "BSD-2-Clause",
+  "dependencies": {
+    "ws": "^7.2.1"
+  }
+}

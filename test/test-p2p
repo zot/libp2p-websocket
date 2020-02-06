@@ -1,0 +1,118 @@
+#!/bin/env node
+const path = require('path');
+const WebSocket = require('ws');
+const prog = process.argv[1]
+const shortProg = path.basename(prog, ".js")
+const args = Array.prototype.slice.call(process.argv, 2)
+const protPat = /^\/x\//
+const peerIdPat = /^[^/]+$/
+
+/*
+# CLIENT-TO-SERVER MESSAGES
+ 
+```
+  Listen:       [1][PROTOCOL: rest]              -- request a listener for a protocol
+  Stop:         [2][PROTOCOL: rest]              -- stop listening on PORT
+  Close:        [3][ID: 8]                       -- close a stream
+  Data:         [4][ID: 8][data: rest]           -- write data to stream
+  Peer Connect: [5][PROTOCOL: STR][PEERID: rest] -- connect to another peer
+```
+
+# SERVER-TO-CLIENT MESSAGES
+
+```
+  Listener Connection:     [1][ID: 8][PROTOCOL: rest] -- new listener connection with id ID
+  Connection Closed:       [2][ID: 8]                 -- connection ID closed
+  Data:                    [3][ID: 8][data: rest]     -- receive data from stream with id ID
+  Listen Refused:          [4][PROTOCOL: rest]        -- could not listen on PORT
+  Listener Closed:         [5][PROTOCOL: rest]        -- could not listen on PORT
+  Peer Connection:         [6][ID: 8]                 -- connected to a peer with id ID
+  Peer Connection Refused: [7][PEERID: rest]          -- connection to peer PEERID refused
+```
+*/
+
+const cmsgListen = 1;
+const cmsgStop = 2;
+const cmsgClose = 3;
+const cmsgData = 4;
+const cmsgPeerConnect = 5;
+
+const smsgIdent = 0;
+const smsgListenerConnection = 1;
+const smsgConnectionClosed = 2;
+const smsgData = 3;
+const smsgListenRefused = 4;
+const smsgListenerClosed = 5;
+const smsgPeerConnection = 6;
+const smsgPeerConnectionRefused = 7;
+
+var ws;
+var peerId;
+var utfDecoder = new TextDecoder("utf-8");
+var utfEncoder = new TextEncoder("utf-8");
+
+function connect(urlStr) {
+    ws = new WebSocket(urlStr);
+    ws.on('open', function open() {
+        console.log("OPENED CONNECTION");
+    });
+    ws.on('message', function(data) {
+        console.log("MESSAGE: ", JSON.stringify(data))
+        switch (data[0]) {
+        case smsgIdent:
+            peerId = utfDecoder.decode(data.slice(1));
+            console.log("PEER ID: ", peerId);
+            process.exit(0);
+            break;
+        case smsgListenerConnection:
+            break;
+        case smsgConnectionClosed:
+            break;
+        case smsgData:
+            break;
+        case smsgListenRefused:
+            break;
+        case smsgListenerClosed:
+            break;
+        case smsgPeerConnection:
+            break;
+        case smsgPeerConnectionRefused:
+            break;
+        }
+    });
+}
+
+function usage(msg) {
+    console.log((msg ? msg+"\n\n" : "")+"Usage: "+shortProg+" <command>\n\n"
+                +shortProg+" send protocol peerid msg...    send some text\n"
+                +shortProg+" listen protocol                print text that other peers send");
+    if (msg) process.exit(1);
+}
+
+function checkProt(str) {
+    if (!str.match(protPat)) {
+        usage('Bad protocol format, protocols must begin with /x/ but this protocol is '+str);
+    }
+}
+
+function checkPeerId(str) {
+    if (!str.match(peerIdPat)) {
+        usage('Bad peer ID format, peer ids must not contain slashes this id is '+str);
+    }
+}
+
+switch (args[0]) {
+case "send":
+    if (args.length < 4) return usage("Not enough arguments to send");
+    checkProt(args[1]);
+    checkPeerId(args[2]);
+    connect("ws://localhost:8888/ipfswsrelay");
+    break;
+case "listen":
+    if (args.length < 2) return usage("Not enough arguments to listen");
+    if (args.length > 2) return usage("Too many arguments to listen");
+    checkProt(args[1]);
+    break;
+default:
+    usage();
+}

@@ -1,0 +1,31 @@
+<html>
+    <head>
+        <script src='chat.js'></script>
+        <style>
+         #chats {
+             width: 132ex;
+         }
+         #topic,
+         #user {
+             width: 50ex;
+         }
+         #conversation {
+             width: 100%;
+         }
+         #scratch {
+             display: none;
+         }
+         #send {
+             width: 100%;
+         }
+        </style>
+    </head>
+    <body>
+        <div id='chats'>
+            <div>Username: <input id='user' type='text'> Topic: <input id='topic' type='text'></div>
+            <textarea id='conversation'></textarea>
+            <div><input id='send' type='text'></div>
+        </div>
+        <div id='scratch'></div>
+    </body>
+</html>

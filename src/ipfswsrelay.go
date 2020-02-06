@@ -61,7 +61,7 @@ const (
 	cmsgClose
 	cmsgData
 	cmsgConnect
-	smsgIdent messageType = iota - cmsgConnect
+	smsgIdent = iota - cmsgConnect - 1 // restart at 0
 	smsgNewConnection
 	smsgConnectionClosed
 	smsgData

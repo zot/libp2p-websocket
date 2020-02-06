@@ -1,12 +1,4 @@
 #!/bin/env node
-const path = require('path');
-const WebSocket = require('ws');
-const prog = process.argv[1]
-const shortProg = path.basename(prog, ".js")
-const args = Array.prototype.slice.call(process.argv, 2)
-const protPat = /^\/x\//
-const peerIdPat = /^[^/]+$/
-
 /*
 # CLIENT-TO-SERVER MESSAGES
  
@@ -30,6 +22,13 @@ const peerIdPat = /^[^/]+$/
   Peer Connection Refused: [7][PEERID: rest]          -- connection to peer PEERID refused
 ```
 */
+"use strict"
+const protPat = /^\/x\//
+const peerIdPat = /^[^/]+$/
+const WebSocket = require('ws');
+const path = require('path');
+const args = Array.prototype.slice.call(process.argv, 2)
+const shortProg = path.basename(process.argv[1], ".js")
 
 const cmsgListen = 0;
 const cmsgStop = 1;
@@ -101,18 +100,23 @@ function checkPeerId(str) {
     }
 }
 
-switch (args[0]) {
-case "send":
-    if (args.length < 4) return usage("Not enough arguments to send");
-    checkProt(args[1]);
-    checkPeerId(args[2]);
-    connect("ws://localhost:8888/ipfswsrelay");
-    break;
-case "listen":
-    if (args.length < 2) return usage("Not enough arguments to listen");
-    if (args.length > 2) return usage("Too many arguments to listen");
-    checkProt(args[1]);
-    break;
-default:
-    usage();
+function runCmdLine() {
+    console.log("ARGS: ", args);
+    switch (args[0]) {
+    case "send":
+        if (args.length < 4) return usage("Not enough arguments to send");
+        checkProt(args[1]);
+        checkPeerId(args[2]);
+        connect("ws://localhost:8888/ipfswsrelay");
+        break;
+    case "listen":
+        if (args.length < 2) return usage("Not enough arguments to listen");
+        if (args.length > 2) return usage("Too many arguments to listen");
+        checkProt(args[1]);
+        break;
+    default:
+        usage();
+    }
 }
+
+runCmdLine();

@@ -56,7 +56,7 @@ import (
 
 type messageType byte
 const (
-	cmsgListen messageType = iota + 1
+	cmsgListen messageType = iota
 	cmsgStop
 	cmsgClose
 	cmsgData

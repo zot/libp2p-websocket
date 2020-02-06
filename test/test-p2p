@@ -31,11 +31,11 @@ const peerIdPat = /^[^/]+$/
 ```
 */
 
-const cmsgListen = 1;
-const cmsgStop = 2;
-const cmsgClose = 3;
-const cmsgData = 4;
-const cmsgPeerConnect = 5;
+const cmsgListen = 0;
+const cmsgStop = 1;
+const cmsgClose = 2;
+const cmsgData = 3;
+const cmsgPeerConnect = 4;
 
 const smsgIdent = 0;
 const smsgListenerConnection = 1;

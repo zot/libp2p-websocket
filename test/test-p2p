@@ -3,11 +3,11 @@
 # CLIENT-TO-SERVER MESSAGES
  
 ```
-  Listen:       [1][PROTOCOL: rest]              -- request a listener for a protocol
-  Stop:         [2][PROTOCOL: rest]              -- stop listening on PORT
-  Close:        [3][ID: 8]                       -- close a stream
-  Data:         [4][ID: 8][data: rest]           -- write data to stream
-  Peer Connect: [5][PROTOCOL: STR][PEERID: rest] -- connect to another peer
+  Listen:  [1][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
+  Stop:    [2][PROTOCOL: rest]            -- stop listening on PORT
+  Close:   [3][ID: 8]                     -- close a stream
+  Data:    [4][ID: 8][data: rest]         -- write data to stream
+  Connect: [5][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- connect to another peer (frames optional)
 ```
 
 # SERVER-TO-CLIENT MESSAGES
@@ -18,8 +18,9 @@
   Data:                    [3][ID: 8][data: rest]     -- receive data from stream with id ID
   Listen Refused:          [4][PROTOCOL: rest]        -- could not listen on PORT
   Listener Closed:         [5][PROTOCOL: rest]        -- could not listen on PORT
-  Peer Connection:         [6][ID: 8]                 -- connected to a peer with id ID
+  Peer Connection:         [6][ID: 8][PROTOCOL: rest] -- connected to a peer with id ID
   Peer Connection Refused: [7][PEERID: rest]          -- connection to peer PEERID refused
+  Protocol Error:          [8][MSG: rest]             -- error in the protocol
 ```
 */
 "use strict"
@@ -29,56 +30,137 @@ const WebSocket = require('ws');
 const path = require('path');
 const args = Array.prototype.slice.call(process.argv, 2)
 const shortProg = path.basename(process.argv[1], ".js")
+const bytes = new ArrayBuffer(8);
+const numberConverter = new DataView(bytes);
 
-const cmsgListen = 0;
-const cmsgStop = 1;
-const cmsgClose = 2;
-const cmsgData = 3;
-const cmsgPeerConnect = 4;
+const cmsg = Object.freeze({
+    listen: 0,
+    stop: 1,
+    close: 2,
+    data: 3,
+    connect: 4,
+});
 
-const smsgIdent = 0;
-const smsgListenerConnection = 1;
-const smsgConnectionClosed = 2;
-const smsgData = 3;
-const smsgListenRefused = 4;
-const smsgListenerClosed = 5;
-const smsgPeerConnection = 6;
-const smsgPeerConnectionRefused = 7;
+const smsg = Object.freeze({
+    ident: 0,
+    listenerConnection: 1,
+    connectionClosed: 2,
+    data: 3,
+    listenRefused: 4,
+    listenerClosed: 5,
+    peerConnection: 6,
+    peerConnectionRefused: 7,
+    error: 8,
+});
 
 var ws;
 var peerId;
 var utfDecoder = new TextDecoder("utf-8");
 var utfEncoder = new TextEncoder("utf-8");
+var connections = new Map();
+var connectionHandler = {
+    closedConnection: id=>null,
+    data: (id, data)=> console.log('Data for ', id, ': ', utfDecoder.decode(data)),
+};
+var sendString = null;
 
-function connect(urlStr) {
+function connectedToServer(prot, id) {
+    if (sendString) {
+        sendData(id, utfEncoder.encode(sendString));
+    }
+}
+
+function connectionFromPeer(prot, id) {
+    if (sendString) {
+        sendData(id, utfEncoder.encode(sendString));
+    }
+}
+
+function enumFor(enumObj, value) {
+    for (var k in enumObj) {
+        if (enumObj[k] == value) return k;
+    }
+    return null;
+}
+
+function sendData(conID, data) {
+    var buf = new Uint8Array(9 + data.length);
+    var dv = new DataView(buf.buffer);
+
+    buf[0] = cmsg.data;
+    dv.setBigUint64(1, conID);
+    buf.set(data, 9)
+    ws.send(buf);
+}
+
+function connect(urlStr, code) {
     ws = new WebSocket(urlStr);
     ws.on('open', function open() {
         console.log("OPENED CONNECTION");
+        code();
     });
-    ws.on('message', function(data) {
-        console.log("MESSAGE: ", JSON.stringify(data))
+    ws.on('message', data=> {
+        var dv = new DataView(new Uint8Array(data).buffer);
+
+        console.log("MESSAGE: ", JSON.stringify(data));
+        console.log("TYPE: ", enumFor(smsg, data[0]));
         switch (data[0]) {
-        case smsgIdent:
+        case smsg.ident: {
             peerId = utfDecoder.decode(data.slice(1));
             console.log("PEER ID: ", peerId);
-            process.exit(0);
             break;
-        case smsgListenerConnection:
+        }
+        case smsg.listenerConnection: {
+            var id = dv.getBigUint64(1);
+            var prot = utfDecoder.decode(data.slice(9));
+
+            connections.set(id, prot);
+            connectionHandler.newConnection(id, prot);
             break;
-        case smsgConnectionClosed:
+        }
+        case smsg.connectionClosed: {
+            connectionHandler.closed(id);
             break;
-        case smsgData:
+        }
+        case smsg.data: {
+            var id = dv.getBigUint64(1);
+            connectionHandler.data(id, data.slice(9));
             break;
-        case smsgListenRefused:
+        }
+        case smsg.listenRefused:
             break;
-        case smsgListenerClosed:
+        case smsg.listenerClosed:
             break;
-        case smsgPeerConnection:
+        case smsg.peerConnection:
+            var conid = dv.getBigUint64(1)
+            var prot = utfDecoder.decode(data.slice(9))
+
+            connectedToServer(prot, conid)
             break;
-        case smsgPeerConnectionRefused:
+        case smsg.peerConnectionRefused: {
+            var prot = getCountedString(dv, 1);
+            var peeridStart = prot.length + 2 + 1;
+            var peerid = getCountedString(dv, peeridStart);
+            var msg = getString(data.slice(peeridStart + peerid.length + 2));
+
+            console.log("Connection refused by peer "+ peerid +" for protocol "+prot+": ("+msg+")");
+            break;
+        }
+        case smsg.error:
+            console.log("Error: "+getString(data.slice(1)));
             break;
         }
     });
+}
+
+function getCountedString(dv, offset) {
+    var start = dv.byteOffset + offset;
+
+    return utfDecoder.decode(dv.buffer.slice(start + 2, start + 2 + dv.getUint16(offset)));
+}
+
+function getString(buf) {
+    return utfDecoder.decode(buf);
 }
 
 function usage(msg) {
@@ -102,21 +184,30 @@ function checkPeerId(str) {
 
 function runCmdLine() {
     console.log("ARGS: ", args);
-    switch (args[0]) {
-    case "send":
-        if (args.length < 4) return usage("Not enough arguments to send");
-        checkProt(args[1]);
-        checkPeerId(args[2]);
-        connect("ws://localhost:8888/ipfswsrelay");
-        break;
-    case "listen":
-        if (args.length < 2) return usage("Not enough arguments to listen");
-        if (args.length > 2) return usage("Too many arguments to listen");
-        checkProt(args[1]);
-        break;
-    default:
-        usage();
-    }
+    connect("ws://localhost:8888/ipfswsrelay", ()=> {
+        switch (args[0]) {
+        case "send":
+            if (args.length < 4) return usage("Not enough arguments to send");
+            var prot = args[1];
+            var peer = args[2];
+            checkProt(prot);
+            checkPeerId(peer);
+            var protEnc = utfEncoder.encode(prot);
+            var protLen = protEnc.length;
+            console.log("Protocol: ", prot, ", peer: ", peer);
+            ws.send(Uint8Array.from([cmsg.connect, 1, Math.trunc(protLen / 256), protLen % 256, ...utfEncoder.encode(prot), ...utfEncoder.encode(peer)]));
+            sendString = args[3];
+            break;
+        case "listen":
+            if (args.length < 2) return usage("Not enough arguments to listen");
+            if (args.length > 2) return usage("Too many arguments to listen");
+            checkProt(args[1]);
+            ws.send(Uint8Array.from([cmsg.listen, 1, ...utfEncoder.encode(args[1])]));
+            break;
+        default:
+            usage();
+        }
+    });
 }
 
 runCmdLine();

@@ -1,4 +1,30 @@
 #!/bin/env node
+/* Copyright (c) 2020, William R. Burdick Jr.
+ *
+ * The MIT License (MIT)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ *
+ * This program demonstrate a simple chat application using p2p communication.
+ *
+ */
+
 /*
 # CLIENT-TO-SERVER MESSAGES
  
@@ -13,14 +39,14 @@
 # SERVER-TO-CLIENT MESSAGES
 
 ```
-  Listener Connection:     [1][ID: 8][PROTOCOL: rest] -- new listener connection with id ID
-  Connection Closed:       [2][ID: 8]                 -- connection ID closed
-  Data:                    [3][ID: 8][data: rest]     -- receive data from stream with id ID
-  Listen Refused:          [4][PROTOCOL: rest]        -- could not listen on PORT
-  Listener Closed:         [5][PROTOCOL: rest]        -- could not listen on PORT
-  Peer Connection:         [6][ID: 8][PROTOCOL: rest] -- connected to a peer with id ID
-  Peer Connection Refused: [7][PEERID: rest]          -- connection to peer PEERID refused
-  Protocol Error:          [8][MSG: rest]             -- error in the protocol
+  Listener Connection:     [1][ID: 8][PROTOCOL: rest]          -- new listener connection with id ID
+  Connection Closed:       [2][ID: 8]                          -- connection ID closed
+  Data:                    [3][ID: 8][data: rest]              -- receive data from stream with id ID
+  Listen Refused:          [4][PROTOCOL: rest]                 -- could not listen on PORT
+  Listener Closed:         [5][PROTOCOL: rest]                 -- could not listen on PORT
+  Peer Connection:         [6][ID: 8][PROTOCOL: rest]          -- connected to a peer with id ID
+  Peer Connection Refused: [7][PEERID: string][PROTOCOL: rest] -- connection to peer PEERID refused
+  Protocol Error:          [8][MSG: rest]                      -- error in the protocol
 ```
 */
 "use strict"
@@ -60,19 +86,22 @@ var utfEncoder = new TextEncoder("utf-8");
 var connections = new Map();
 var connectionHandler = {
     closedConnection: id=>null,
-    data: (id, data)=> console.log('Data for ', id, ': ', utfDecoder.decode(data)),
+    data: (id, data)=> {
+        console.log('Data for ', id, ': ', utfDecoder.decode(data));
+        process.exit(0);
+    },
 };
 var sendString = null;
 
 function connectedToServer(prot, id) {
     if (sendString) {
-        sendData(id, utfEncoder.encode(sendString));
+        sendData(id, utfEncoder.encode(sendString), ()=> process.exit(0));
     }
 }
 
 function connectionFromPeer(prot, id) {
     if (sendString) {
-        sendData(id, utfEncoder.encode(sendString));
+        sendData(id, utfEncoder.encode(sendString), ()=> process.exit(0));
     }
 }
 
@@ -83,14 +112,15 @@ function enumFor(enumObj, value) {
     return null;
 }
 
-function sendData(conID, data) {
+function sendData(conID, data, cb) {
     var buf = new Uint8Array(9 + data.length);
     var dv = new DataView(buf.buffer);
 
+    console.log("SENDING DATA TO CONNECTION", conID)
     buf[0] = cmsg.data;
     dv.setBigUint64(1, conID);
     buf.set(data, 9)
-    ws.send(buf);
+    ws.send(buf, cb);
 }
 
 function connect(urlStr, code) {
@@ -164,7 +194,8 @@ function getString(buf) {
 }
 
 function usage(msg) {
-    console.log((msg ? msg+"\n\n" : "")+"Usage: "+shortProg+" <command>\n\n"
+    console.log((msg ? msg+"\n\n" : "")+"Usage: "+shortProg+"[--port PORT] <command>\n\n"
+                          +"--port PORT                     use PORT to connect to relay (default 8888)\n"
                 +shortProg+" send protocol peerid msg...    send some text\n"
                 +shortProg+" listen protocol                print text that other peers send");
     if (msg) process.exit(1);
@@ -183,26 +214,33 @@ function checkPeerId(str) {
 }
 
 function runCmdLine() {
-    console.log("ARGS: ", args);
-    connect("ws://localhost:8888/ipfswsrelay", ()=> {
-        switch (args[0]) {
+    var port = 8888
+    var tmpArgs = args
+
+    console.log("ARGS: ", tmpArgs);
+    if (args[0] == "--port") {
+        port = args[1];
+        tmpArgs = args.slice(2);
+    }
+    connect("ws://localhost:"+port+"/ipfswsrelay", ()=> {
+        switch (tmpArgs[0]) {
         case "send":
-            if (args.length < 4) return usage("Not enough arguments to send");
-            var prot = args[1];
-            var peer = args[2];
+            if (tmpArgs.length < 4) return usage("Not enough arguments to send");
+            var prot = tmpArgs[1];
+            var peer = tmpArgs[2];
             checkProt(prot);
             checkPeerId(peer);
             var protEnc = utfEncoder.encode(prot);
             var protLen = protEnc.length;
             console.log("Protocol: ", prot, ", peer: ", peer);
+            sendString = tmpArgs[3];
             ws.send(Uint8Array.from([cmsg.connect, 1, Math.trunc(protLen / 256), protLen % 256, ...utfEncoder.encode(prot), ...utfEncoder.encode(peer)]));
-            sendString = args[3];
             break;
         case "listen":
-            if (args.length < 2) return usage("Not enough arguments to listen");
-            if (args.length > 2) return usage("Too many arguments to listen");
-            checkProt(args[1]);
-            ws.send(Uint8Array.from([cmsg.listen, 1, ...utfEncoder.encode(args[1])]));
+            if (tmpArgs.length < 2) return usage("Not enough arguments to listen");
+            if (tmpArgs.length > 2) return usage("Too many arguments to listen");
+            checkProt(tmpArgs[1]);
+            ws.send(Uint8Array.from([cmsg.listen, 1, ...utfEncoder.encode(tmpArgs[1])]));
             break;
         default:
             usage();

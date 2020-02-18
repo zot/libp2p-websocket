@@ -65,6 +65,8 @@ const cmsg = Object.freeze({
     close: 2,
     data: 3,
     connect: 4,
+    discoveryListen: 5,
+    discoveryConnect: 6,
 });
 
 const smsg = Object.freeze({
@@ -77,6 +79,8 @@ const smsg = Object.freeze({
     peerConnection: 6,
     peerConnectionRefused: 7,
     error: 8,
+    discoveryListenerConnection: 9,
+    discoveryPeerConnection: 10,
 });
 
 var ws;
@@ -100,6 +104,18 @@ function connectedToServer(prot, id) {
 }
 
 function connectionFromPeer(prot, id) {
+    if (sendString) {
+        sendData(id, utfEncoder.encode(sendString), ()=> process.exit(0));
+    }
+}
+
+function connectedToDiscoveryServer(prot, id) {
+    if (sendString) {
+        sendData(id, utfEncoder.encode(sendString), ()=> process.exit(0));
+    }
+}
+
+function connectionFromDiscoveryPeer(prot, id) {
     if (sendString) {
         sendData(id, utfEncoder.encode(sendString), ()=> process.exit(0));
     }
@@ -129,6 +145,7 @@ function connect(urlStr, code) {
         console.log("OPENED CONNECTION");
         code();
     });
+    ws.on('error', err=> console.log('Error: ', err));
     ws.on('message', data=> {
         var dv = new DataView(new Uint8Array(data).buffer);
 
@@ -179,6 +196,21 @@ function connect(urlStr, code) {
         case smsg.error:
             console.log("Error: "+getString(data.slice(1)));
             break;
+        case smsg.discoveryListenerConnection:
+            var conid = dv.getBigUint64(1)
+            var peerid = getCountedString(dv, 9)
+            var prot = utfDecoder.decode(data.slice(9 + peerid.length + 2))
+
+            connections.set(id, prot);
+            connectionHandler.newConnection(id, prot);
+            break;
+        case smsg.discoveryPeerConnection:
+            var conid = dv.getBigUint64(1)
+            var peerid = getCountedString(dv, 9)
+            var prot = utfDecoder.decode(data.slice(9 + peerid.length + 2))
+
+            connectedToDiscoveryServer(prot, conid)
+            break;
         }
     });
 }
@@ -195,8 +227,9 @@ function getString(buf) {
 
 function usage(msg) {
     console.log((msg ? msg+"\n\n" : "")+"Usage: "+shortProg+"[--port PORT] <command>\n\n"
-                          +"--port PORT                     use PORT to connect to relay (default 8888)\n"
-                +shortProg+" send protocol peerid msg...    send some text\n"
+                +"--host HOST                     connect to relay at HOST (default localhost)\n"
+                +"--port PORT                     connect to relay on PORT (default 8888)\n"
+                +shortProg+" send protocol msg...    send some text\n"
                 +shortProg+" listen protocol                print text that other peers send");
     if (msg) process.exit(1);
 }
@@ -214,33 +247,43 @@ function checkPeerId(str) {
 }
 
 function runCmdLine() {
-    var port = 8888
-    var tmpArgs = args
+    var host = "localhost";
+    var port = 8888;
+    var tmpArgs = args;
 
     console.log("ARGS: ", tmpArgs);
-    if (args[0] == "--port") {
-        port = args[1];
-        tmpArgs = args.slice(2);
+    for (;;) {
+        switch (tmpArgs[0]) {
+        case "--port":
+            port = tmpArgs[1];
+            tmpArgs = tmpArgs.slice(2);
+            continue;
+        case "--host":
+            host = tmpArgs[1];
+            tmpArgs = tmpArgs.slice(2);
+            continue;
+        }
+        break;
     }
-    connect("ws://localhost:"+port+"/ipfswsrelay", ()=> {
+    console.log("CONNECTING TO "+"ws://"+host+":"+port+"/ipfswsrelay");
+    connect("ws://"+host+":"+port+"/ipfswsrelay", ()=> {
         switch (tmpArgs[0]) {
         case "send":
-            if (tmpArgs.length < 4) return usage("Not enough arguments to send");
+            if (tmpArgs.length < 3) return usage("Not enough arguments to send");
             var prot = tmpArgs[1];
-            var peer = tmpArgs[2];
             checkProt(prot);
-            checkPeerId(peer);
             var protEnc = utfEncoder.encode(prot);
             var protLen = protEnc.length;
-            console.log("Protocol: ", prot, ", peer: ", peer);
-            sendString = tmpArgs[3];
-            ws.send(Uint8Array.from([cmsg.connect, 1, Math.trunc(protLen / 256), protLen % 256, ...utfEncoder.encode(prot), ...utfEncoder.encode(peer)]));
+            sendString = tmpArgs.slice(2).join(" ");
+            console.log("Protocol: ", prot, ", message: ", sendString);
+            ws.send(Uint8Array.from([cmsg.discoveryConnect, 1, ...utfEncoder.encode(prot)]));
             break;
         case "listen":
             if (tmpArgs.length < 2) return usage("Not enough arguments to listen");
             if (tmpArgs.length > 2) return usage("Too many arguments to listen");
-            checkProt(tmpArgs[1]);
-            ws.send(Uint8Array.from([cmsg.listen, 1, ...utfEncoder.encode(tmpArgs[1])]));
+            var prot = tmpArgs[1];
+            checkProt(prot);
+            ws.send(Uint8Array.from([cmsg.discoveryListen, 1, ...utfEncoder.encode(prot)]));
             break;
         default:
             usage();

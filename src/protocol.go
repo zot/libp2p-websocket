@@ -40,17 +40,20 @@ messages, with the first byte of each message identifying the command.
 # CLIENT-TO-SERVER MESSAGES
  
 ```
-  Listen:  [1][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
-  Stop:    [2][PROTOCOL: rest]            -- stop listening on PORT
-  Close:   [3][ID: 8]                     -- close a stream
-  Data:    [4][ID: 8][data: rest]         -- write data to stream
-  Connect: [5][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- connect to another peer (frames optional)
+  Listen:      [0][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
+  Stop:        [1][PROTOCOL: rest]            -- stop listening on PORT
+  Close:       [2][ID: 8]                     -- close a stream
+  Data:        [3][ID: 8][data: rest]         -- write data to stream
+  Connect:     [4][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- connect to another peer (frames optional)
+  Dsc Listen:  [5][FRAMES: 1][PROTOCOL: rest] -- host a protocol using discovery
+  Dsc Connect: [6][FRAMES: 1][PROTOCOL: rest] -- request a connection to a protocol using discovery
 ```
 
 # SERVER-TO-CLIENT MESSAGES
 
 ```
-  Listener Connection:     [1][ID: 8][PROTOCOL: rest]          -- new listener connection with id ID
+  Identify:                [0][PEERID: str]                    -- successful initialization
+  Listener Connection:     [1][ID: 8][PEERID: str][PROTOCOL: rest] -- new listener connection with id ID
   Connection Closed:       [2][ID: 8]                          -- connection ID closed
   Data:                    [3][ID: 8][data: rest]              -- receive data from stream with id ID
   Listen Refused:          [4][PROTOCOL: rest]                 -- could not listen on PORT
@@ -58,17 +61,17 @@ messages, with the first byte of each message identifying the command.
   Peer Connection:         [6][ID: 8][PROTOCOL: rest]          -- connected to a peer with id ID
   Peer Connection Refused: [7][PEERID: string][PROTOCOL: rest] -- connection to peer PEERID refused
   Protocol Error:          [8][MSG: rest]                      -- error in the protocol
+  Dsc Listener Connection: [9][ID: 8][PEERID: str][PROTOCOL: rest] -- connection from a discovery peer
+  Dsc Peer Connection:     [10][ID: 8][PEERID: str][PROTOCOL: rest] -- connected to a discovery host
 ```
 
 This code uses quite a few goroutines and channels. Here is the pattern:
 
-1) structs which implement the chanSvc interface use a channel to receive functions to execute within a single goroutine
+1) structs which implement the chanSvc interface use a channel to receive functions to execute within a single svc goroutine
 
-2) fields commented with "immutable" are safe to read in any goroutine
+2) fields commented with "immutable" don't change, so they are safe to read in any goroutine
 
-3) in general, methods are only safe to use within their own goroutines
-
-4) methods marked SVC are safe to call from outside because they wrap their code in a svc() call
+3) in general, methods are only safe to use within their own svc goroutines
 
 */
 
@@ -85,6 +88,7 @@ import (
 	"io"
 	"errors"
 	"syscall"
+	"bytes"
 )
 
 type messageType byte
@@ -94,7 +98,9 @@ const (
 	cmsgClose
 	cmsgData
 	cmsgConnect
-	smsgIdent = iota - cmsgConnect - 1 // restart at 0
+	cmsgDscListen
+	cmsgDscConnect
+	smsgIdent = iota - cmsgDscConnect - 1 // restart at 0
 	smsgNewConnection
 	smsgConnectionClosed
 	smsgData
@@ -103,10 +109,12 @@ const (
 	smsgPeerConnection
 	smsgPeerConnectionRefused
 	smsgError
+	smsgDscHostConnect
+	smsgDscPeerConnect
 )
 
-var cmsgNames = [...]string{"cmsgListen", "cmsgStop", "cmsgClose", "cmsgData", "cmsgConnect"}
-var smsgNames = [...]string{"smsgIdent", "smsgNewConnection", "smsgConnectionClosed", "smsgData", "smsgListenRefused", "smsgListenerClosed", "smsgPeerConnection", "smsgPeerConnectionRefused", "smsgError"}
+var cmsgNames = [...]string{"cmsgListen", "cmsgStop", "cmsgClose", "cmsgData", "cmsgConnect", "cmsgDscListen", "cmsgDscConnect"}
+var smsgNames = [...]string{"smsgIdent", "smsgNewConnection", "smsgConnectionClosed", "smsgData", "smsgListenRefused", "smsgListenerClosed", "smsgPeerConnection", "smsgPeerConnectionRefused", "smsgError", "smsgDscHostConnect", "smsgDscPeerConnect"}
 
 const (
 	maxMessageSize = 65536 // Maximum websocket message size
@@ -171,6 +179,17 @@ type protocolHandler interface {
 	Close(c *client, conID uint64)
 	Data(c *client, conID uint64, data []byte)
 	Connect(c *client, protocol string, peerID string, frames bool)
+}
+
+/*
+ * A callback service that uses the following advertisement strings:
+ *   libp2p-connection-direct-PROTOCOL: this peer is hosting PROTOCOL and can receive direct connections
+ *   libp2p-connection-indirect-PROTOCOL: this peer is hosting PROTOCOL but can only make outgoing connections. It is expected to monitor connection requests and also use the circuit relay
+ *   libp2p-connection-request-PROTOCOL: this peer is requesting a connection for PROTOCOL
+ */
+type discoveryHandler interface {
+	DiscoveryListen(c *client, frames bool, protocol string) error
+	DiscoveryConnect(c *client, frames bool, protocol string) error
 }
 
 type chanSvc interface {
@@ -303,7 +322,7 @@ func (c *client) getSvcChannel() chan func() {
 }
 
 // write a frame to the client
-func (c *client) receiveFrameSVC(con *connection, buf []byte, err error) {
+func (c *client) receiveFrame(con *connection, buf []byte, err error) {
 	svc(c, func() {
 		if err != nil {
 			fmt.Println("Error reading data from", con, ": ", err.Error())
@@ -330,7 +349,7 @@ func (c *client) assertConnection(conID uint64, test bool, msg string) bool {
 func (c *client) assert(test bool, msg string) bool {
 	if !test {
 		fmt.Println("ERROR: ", msg)
-		c.writeMessage(smsgError, []byte(msg))
+		c.writePackedMessage(smsgError, msg)
 	}
 	return test
 }
@@ -363,30 +382,37 @@ func (c *client) readWebsocket(r *relay) {
 			svc(c, func() {
 				if err == nil && len(data) > 0 {
 					fmt.Printf("MSG TYPE: %v\n", messageType(data[0]).clientName())
-					typ := messageType(data[0])
-					data = data[1:]
-					switch messageType(typ) {
+					body := data[1:]
+					switch messageType(data[0]) {
 					case cmsgListen:
-						if c.assert(len(data) > 1, "Bad message format for cmsgListen") {
-							r.Listen(c, string(data[1:]), data[0] != 0)
+						if c.assert(len(body) > 1, "Bad message format for cmsgListen") {
+							r.Listen(c, string(body[1:]), body[0] != 0)
 						}
 					case cmsgStop:
-						if c.assert(len(data) > 0, "Bad message format for cmsgStop") {
-							r.Stop(c, string(data))
+						if c.assert(len(body) > 0, "Bad message format for cmsgStop") {
+							r.Stop(c, string(body))
 						}
 					case cmsgClose:
-						if c.assert(len(data) == 8, "Bad message format for cmsgClose") {
-							r.Close(c, binary.BigEndian.Uint64(data[:8]))
+						if c.assert(len(body) == 8, "Bad message format for cmsgClose") {
+							r.Close(c, binary.BigEndian.Uint64(body[:8]))
 						}
 					case cmsgData:
-						if c.assert(len(data) > 8, "Bad message format for cmsgData") {
-							r.Data(c, binary.BigEndian.Uint64(data[:8]), data[8:])
+						if c.assert(len(body) > 8, "Bad message format for cmsgData") {
+							r.Data(c, binary.BigEndian.Uint64(body[:8]), body[8:])
 						}
 					case cmsgConnect:
-						if c.assert(len(data) > 3, "Bad message format for cmsgConnect") {
-							prot, peerid := getString(data[1:])
+						if c.assert(len(body) > 3, "Bad message format for cmsgConnect") {
+							prot, peerid := getString(body[1:])
 							fmt.Println("Prot: "+prot+", Peer id: "+string(peerid))
-							r.Connect(c, prot, string(peerid), data[0] != 0)
+							r.Connect(c, prot, string(peerid), body[0] != 0)
+						}
+					case cmsgDscListen:
+						if c.assert(len(body) > 2, "Bad message formag for cmsgDscListen") {
+							r.DiscoveryListen(c, body[0] != 0, string(body[1:]))
+						}
+					case cmsgDscConnect:
+						if c.assert(len(body) > 2, "Bad message formag for cmsgDscConnect") {
+							r.DiscoveryConnect(c, body[0] != 0, string(body[1:]))
 						}
 					}
 				} else if err != nil {
@@ -406,10 +432,7 @@ func (c *client) putID(conID uint64, offset int) {
 }
 
 func (c *client) closeStreamWithMessage(conID uint64, msg string) {
-	buf := make([]byte, 9 + len(msg))
-	buf[0] = byte(smsgConnectionClosed)
-	binary.BigEndian.PutUint64(buf[1:], conID)
-	c.writeFullMessage(buf[:])
+	c.writePackedMessage(smsgConnectionClosed, conID)
 	c.relay.Close(c, conID)
 }
 
@@ -438,7 +461,7 @@ func (c *client) readStreamFrames(con *connection) {
 				len := binary.BigEndian.Uint32(lenbuf)
 				fmt.Printf("RECEIVING %d BYTES, %v\n", len, lenbuf)
 				_, err = io.ReadFull(con.stream, body[:len])
-				c.receiveFrameSVC(con, con.readBuf[:len + 9], err)
+				c.receiveFrame(con, con.readBuf[:len + 9], err)
 			} else {
 				fmt.Printf("ERROR READING FRAME LENGTH: %v\n", err)
 			}
@@ -447,21 +470,20 @@ func (c *client) readStreamFrames(con *connection) {
 }
 
 func (c *client) readStreamData(con *connection) {
-	if c.relay.HasConnection(c, con.id) {
-		go func() {
+	go func() {
+		var err error
+
+		for err == nil {
 			body := con.readBuf[1:]
 			len, err := con.stream.Read(body)
 			if err != nil {
-				c.receiveFrameSVC(con, con.readBuf, err)
+				c.receiveFrame(con, con.readBuf, err)
 			} else {
 				fmt.Println("RECEIVED ", len, " BYTES")
-				c.receiveFrameSVC(con, con.readBuf[0:1 + len], err)
+				c.receiveFrame(con, con.readBuf[0:1 + len], err)
 			}
-			svc(c, func() {
-				c.readStreamData(con);
-			})
-		}()
-	}
+		}
+	}()
 }
 
 func (c *client) newConnectionID() uint64 {
@@ -500,28 +522,50 @@ func putString(buf []byte, str string) []byte {
 	return buf[2 + len(str):]
 }
 
-func (c *client) writeIDMessage(typ messageType, id uint64) error {
-	msg := [9]byte{byte(typ)}
-	binary.BigEndian.PutUint64(msg[1:], id)
-	return c.writeFullMessage(msg[:])
-}
-
-func (c *client) writePortMessage(typ messageType, port int) error {
-	msg := [5]byte{byte(typ)}
-	binary.BigEndian.PutUint32(msg[1:], uint32(port))
-	return c.writeFullMessage(msg[:])
+/*
+ * pack data into a message, handling these types:
+ *   string
+ *   []byte
+ *   byte
+ *   uint32
+ *   uint64
+ */
+func pack(typ messageType, items ...interface{}) []byte {
+	buf := bytes.NewBuffer(make([]byte, 0, 16))
+	buf.WriteByte(byte(typ))
+	for i, item := range items {
+		switch item.(type) {
+		case byte:
+			buf.WriteByte(item.(byte))
+		case []byte:
+			buf.Write(item.([]byte))
+		case string:
+			str := item.(string)
+			if i + 1 < len(items) {
+				binary.Write(buf, binary.BigEndian, uint16(len(str)))
+			}
+			buf.Write([]byte(str))
+		case uint32:
+			binary.Write(buf, binary.BigEndian, item.(uint32))
+		case uint64:
+			binary.Write(buf, binary.BigEndian, item.(uint64))
+		}
+	}
+	fmt.Printf("PACKED BYTES: %#v\n", buf.Bytes())
+	return buf.Bytes()
 }
 
 func (c *client) writeMessage(typ messageType, body []byte) error {
-	msg := make([]byte, len(body) + 1)
-	msg[0] = byte(typ)
-	copy(msg[1:], body)
-	return c.writeFullMessage(msg)
+	return c.writePackedMessage(typ, body)
+}
+
+func (c *client) writePackedMessage(typ messageType, items ...interface{}) error {
+	fmt.Println(append(array("WRITING", typ.serverName(), "MESSAGE"), items...)...)
+	return c.writeFullMessage(pack(typ, items...))
 }
 
 func (c *client) writeFullMessage(msg []byte) error {
 	fmt.Printf("Writing message type %v\n", messageType(msg[0]).serverName())
-	//debug.PrintStack()
 	werr := c.control.WriteMessage(websocket.BinaryMessage, msg)
 	if werr != nil {
 		c.close()
@@ -530,22 +574,20 @@ func (c *client) writeFullMessage(msg []byte) error {
 }
 
 func (c *client) connectionRefused(err error, peerid string, protocol string) {
-	msgLen := 1 + len(protocol) + 2 + len(peerid) + 2 + len(err.Error())
-	c.buf[0] = byte(smsgPeerConnectionRefused)
-	next := putString(c.buf[1:], peerid)
-	next = putString(next, protocol)
-	copy(next, err.Error())
-	fmt.Println("ERROR: ", err.Error())
-	c.writeFullMessage(c.buf[:msgLen])
+	c.writePackedMessage(smsgPeerConnectionRefused, peerid, protocol, err.Error())
 }
 
 func (c *client) newConnection(protocol string, create func(conID uint64) *connection) {
 	id := c.newConnectionID()
 	c.read(create(id))
-	c.buf[0] = byte(smsgPeerConnection)
-	c.putID(id, 1)
-	copy(c.buf[9:], protocol)
-	c.writeFullMessage(c.buf[:9 + len(protocol)])
+	c.writePackedMessage(smsgPeerConnection, id, protocol)
+}
+
+func (c *client) checkProtocolErr(err error, typ messageType) {
+	if err != nil {
+		c.writePackedMessage(smsgError, fmt.Sprintf("Bad message format for %v", typ.clientName()))
+		c.close()
+	}
 }
 
 func (r *relay) HasConnection(c *client, id uint64) bool {
@@ -576,6 +618,24 @@ func (r *relay) Connect(c *client, protocol string, peerID string, frames bool) 
 	r.handler.Connect(c, protocol, peerID, frames)
 }
 
+func (r *relay) DiscoveryListen(c *client, frames bool, prot string) {
+	dsc, ok := r.handler.(discoveryHandler)
+	if !ok {
+		c.writePackedMessage(smsgError, "Relay does not support discovery")
+	} else {
+		dsc.DiscoveryListen(c, frames, prot)
+	}
+}
+
+func (r *relay) DiscoveryConnect(c *client, frames bool, prot string) {
+	dsc, ok := r.handler.(discoveryHandler)
+	if !ok {
+		c.writePackedMessage(smsgError, "Relay does not support discovery")
+	} else {
+		dsc.DiscoveryConnect(c, frames, prot)
+	}
+}
+
 func (r *relay) init() {
 	r.clients = make(map[*websocket.Conn]*client)
 	r.managementChan = make(chan func())
@@ -601,11 +661,18 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 				client := r.CreateClient()
 				client.control = con
 				r.clients[con] = client
-				fmt.Println("Identifying peer: ", r.peerID)
-				client.writeMessage(smsgIdent, []byte(r.peerID))
+				client.writePackedMessage(smsgIdent, r.peerID)
 				runSvc(client)
 				client.readWebsocket(r)
 			})
 		}
 	}
+}
+
+func newBuf(len int) *bytes.Buffer {
+	return bytes.NewBuffer(make([]byte, len))
+}
+
+func array(item ...interface{}) []interface{} {
+	return item[:]
 }

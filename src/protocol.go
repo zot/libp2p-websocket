@@ -508,15 +508,13 @@ func (c *client) readStreamFrames(con *connection) {
 			len := uint32(0)
 			body := con.readBuf[9:]
 			lenbuf := con.readBuf[9:13]
-			//for i := range lenbuf {lenbuf[i] = 32} // this was for verification
-			con.stream.SetReadDeadline(time.Now().Add(60 * time.Second))
-			_, err = io.ReadFull(con.stream, lenbuf) // read the length
-			if err == nil {
+			err = reallyReadFull(con.stream, lenbuf) // read the length
+			if err != nil {
+				fmt.Printf("ERROR READING FRAME LENGTH: %v\n", err)
+			} else {
 				len = binary.BigEndian.Uint32(lenbuf)
 				fmt.Printf("RECEIVING %d BYTES, %v\n", len, lenbuf)
-				_, err = io.ReadFull(con.stream, body[:len])
-			} else {
-				fmt.Printf("ERROR READING FRAME LENGTH: %v\n", err)
+				err = reallyReadFull(con.stream, body[:len])
 			}
 			if err == nil {
 				fmt.Printf("RECEIVED %d BYTES: %#v\n", len, con.readBuf[0:9 + len])
@@ -524,6 +522,28 @@ func (c *client) readStreamFrames(con *connection) {
 			c.receiveFrame(con, con.readBuf[:len + 9], err)
 		}
 	}()
+}
+
+// retry on timeout errors
+func reallyReadFull(stream twoWayStream, buf []byte) error {
+	start := 0
+	for start < len(buf) {
+		stream.SetReadDeadline(time.Now().Add(60 * time.Second))
+		len, err := io.ReadFull(stream, buf[start:])
+		start += len
+		if err != nil {
+			if _, ok := err.(net.Error); ok && err.(net.Error).Timeout() {
+				fmt.Println("continuing from read timeout")
+				continue
+			}
+			if err != nil && errors.Is(err, syscall.ETIMEDOUT) {
+				fmt.Println("continuing from read timeout")
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *client) readStreamData(con *connection) {

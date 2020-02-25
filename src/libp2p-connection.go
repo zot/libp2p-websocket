@@ -27,6 +27,7 @@
 package main
 
 import (
+	"os"
 	"context"
 	"flag"
 	"fmt"
@@ -78,6 +79,8 @@ const (
 )
 
 type addrList []multiaddr.Multiaddr
+
+type fileList []string
 
 type retryError string
 
@@ -512,6 +515,13 @@ func (r *libp2pRelay) tryConnect(ctx context.Context, c *libp2pClient, peerID pe
 	return con, nil
 }
 
+func (r *libp2pRelay) printAddresses() {
+	fmt.Println("Addresses:")
+	for _, addr := range r.host.Addrs() {
+		fmt.Println("   ", addr.String()+"/p2p/"+r.peerID)
+	}
+}
+
 func createListener() *listener {
 	lis := new(listener)
 	lis.connections = make(map[uint64]*libp2pConnection)
@@ -759,6 +769,23 @@ func initp2p(relay *libp2pRelay) {
 	}()
 }
 
+func (fl *fileList) String() string {
+	strs := make([]string, len(*fl))
+	for i, file := range *fl {
+		strs[i] = string(file)
+	}
+	return strings.Join(strs, ",")
+}
+
+func (fl *fileList) Set(value string) error {
+	_, err := os.Stat(value)
+	if err != nil {
+		return err
+	}
+	*fl = append(*fl, value)
+	return nil
+}
+
 func (al *addrList) String() string {
 	strs := make([]string, len(*al))
 	for i, addr := range *al {
@@ -787,25 +814,18 @@ func StringsToAddrs(addrStrings []string) (maddrs []multiaddr.Multiaddr, err err
 	return
 }
 
-func (r *libp2pRelay) printAddresses() {
-	fmt.Println("Addresses:")
-	for _, addr := range r.host.Addrs() {
-		fmt.Println("   ", addr.String()+"/p2p/"+r.peerID)
-	}
-}
-
 func main() {
 	log.SetFlags(log.Lshortfile)
 	browse := ""
 	relay := createLibp2pRelay()
 	addr := "localhost"
 	port := 8888
-	files := ""
 	noBootstrap := false
 	bootstrapArg := addrList([]multiaddr.Multiaddr{})
+	fileList := fileList([]string{})
 	flag.BoolVar(&noBootstrap, "nopeers", false, "clear the bootstrap peer list")
 	flag.StringVar(&peerKey, "key", "", "specify peer key")
-	flag.StringVar(&files, "files", files, "optional directory to use for file serving")
+	flag.Var(&fileList, "files", "add the contents of a directory to serve from /")
 	flag.StringVar(&addr, "addr", "", "host address to listen on")
 	flag.IntVar(&port, "port", port, "port to listen on")
 	flag.Var(&bootstrapArg, "peer", "Adds a peer multiaddress to the bootstrap list")
@@ -823,22 +843,21 @@ func main() {
 	runSvc(relay)
 	fmt.Printf("Listening on port %v\nPeer id: %v\n", port, relay.peerID)
 	http.HandleFunc("/ipfswsrelay", relay.handleConnection())
-	if files != "" {
-		f, err := filepath.Abs(files)
-		if err != nil {
-			log.Fatal(err)
+	if len(fileList) > 0 {
+		for _, dir := range fileList {
+			fmt.Println("File dir: ", dir)
 		}
-		files = f
-		if files != "" {
-			http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				reqFile, err := filepath.Abs(filepath.Join(files, r.URL.Path))
-				if err != nil || len(reqFile) < len(files) || files[:] != reqFile[0:len(files)] {
-					http.Error(w, "Not found", http.StatusNotFound)
-				} else {
-					http.ServeFile(w, r, reqFile)
-				}
-			})
-		}
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			for _, dir := range fileList {
+				reqFile, err := filepath.Abs(filepath.Join(dir, r.URL.Path))
+				if err != nil {continue}
+				_, err = os.Stat(reqFile)
+				if err != nil {continue}
+				http.ServeFile(w, r, reqFile)
+				return
+			}
+			http.Error(w, "Not found", http.StatusNotFound)
+		})
 	} else {
 		http.Handle("/", http.FileServer(FS(false)))
 	}

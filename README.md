@@ -42,17 +42,17 @@ The client and server exchange these command messages, with the first byte of ea
 
 `./libp2p-connection -browser chat.html` will start the relay and pop the chat example in a browser
 
-In development, you can use -files to point to the live html/js/css files your are editing. Be aware, however, that it only accepts one -files argument so you can only have one directory. The easiest way to use it for development is to make a development directory and symlink the examples/* and html/* files into it.
+In development, you can use -files to point to the live html/js/css files your are editing. If you are in the src directory, you should be able to use this command: `libp2p-connection -files html -files examples`
 
 ## Usage:
 ```
-Usage of ./libp2p-connection:
+Usage of libp2p-connection:
   -addr string
         host address to listen on
   -browse string
         Browse a URL
-  -files string
-        optional directory to use for file serving
+  -files value
+        add the contents of a directory to serve from /
   -key string
         specify peer key
   -listen value

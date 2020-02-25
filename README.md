@@ -42,6 +42,8 @@ The client and server exchange these command messages, with the first byte of ea
 
 `./libp2p-connection -browser chat.html` will start the relay and pop the chat example in a browser
 
+In development, you can use -files to point to the live html/js/css files your are editing. Be aware, however, that it only accepts one -files argument so you can only have one directory. The easiest way to use it for development is to make a development directory and symlink the examples/* and html/* files into it.
+
 ## Usage:
 ```
 Usage of ./libp2p-connection:
@@ -65,7 +67,10 @@ Usage of ./libp2p-connection:
 
 # Building
 
-## Prerequisites: esc: `go get -u github.com/mjibson/esc` -- make sure this is on your path (it should go into $GOHOME/bin).
+## Prerequisites
+**go**: you need [go](https://golang.org/) if you want to build the go part (which includes updating the default HTML files)
+
+**esc:** `go get -u github.com/mjibson/esc` -- make sure this is on your path (it should go into $GOHOME/bin).
 
 ## Building the default webdir
 

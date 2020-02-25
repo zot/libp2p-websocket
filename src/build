@@ -1,0 +1,7 @@
+#!/bin/sh
+dir=$(mktemp -d)
+output=$(pwd)/files.go
+cp -a examples/* $dir
+cp -a html/* $dir
+cd $dir
+esc -o $output *

@@ -1,0 +1,134 @@
+<html>
+    <head>
+        <style>
+         #chats {
+             width: 132ex;
+             display: flow;
+         }
+         #chatsWait {
+             border: solid black 2px;
+             background: lightgray;
+         }
+         body.showGui #chatsWait {
+             display: none;
+         }
+         .panel {
+             overflow: auto;
+             border: solid gray 2px;
+             border-radius: 5px;
+         }
+         #chatsBody {
+             display: none;
+         }
+         body.showGui #chatsBody {
+             display: initial;
+         }
+         #topic,
+         #user {
+             width: 50ex;
+         }
+         #conversation {
+             width: 100%;
+             flex-grow: 1;
+         }
+         #scratch {
+             display: none;
+         }
+         #send {
+             width: 100%;
+         }
+         #hostDiv {
+             display: flex;
+         }
+         #listenerStatus {
+             flex-grow: 1;
+             margin-left: 1ex;
+         }
+         #connectDiv {
+             display: flex;
+         }
+         #connect {
+             margin-right: 1ex;
+         }
+         #toHostID {
+             flex-grow: 1;
+             margin-left: 1ex;
+         }
+         .connected #toHostID {
+             display: none;
+         }
+         #connectStatus {
+             display: none;
+         }
+         .connected #connectStatus {
+             display: initial;
+         }
+         #userDiv {
+             display: flex;
+         }
+         #user {
+             flex-grow: 1;
+         }
+         .hasUser #userNameRequired {
+             display: none;
+         }
+         .hasNat #awaitingPeer {
+             display: none;
+         }
+         #chatPanel {
+             display: flex;
+             height: 50ex;
+         }
+         #userPanel {
+             width: 20ex;
+             display: flex;
+             flex-flow: column;
+         }
+         #users {
+             flex-grow: 1;
+         }
+         #messagePanel {
+             display: flex;
+             flex-flow: column;
+             flex-grow: 1;
+         }
+        </style>
+        <script src='chat.js' type='module'></script>
+    </head>
+    <body>
+        <div id='chats'>
+            <div id='userDiv'>Username: <input id='user' type='text'></div>
+            <div>NAT Status: <span id='natStatus'></span> </div>
+            <div>Peer ID: <span id='peerID' type='text'></span></div>
+            <div>
+                <div id='chatsWait'>
+                    <div id='userNameRequired'>PLEASE ENTER USER NAME</div>
+                    <div id='awaitingPeer'>WAITING FOR PEER STATUS</div>
+                </div>
+                <div id='chatsBody'>
+                    <div id='hostDiv'>
+                        <button id='host'>Host</button>
+                        <input id='listenerStatus' type='text' readonly='true'>
+                    </div>
+                    <div id='connectDiv'>
+                        <button id='connect'>Connect</button>
+                        To peer: <input id='toHostID' type='text'>
+                        <span id='connectStatus'></span>
+                    </div>
+                    <div id='chatPanel'>
+                        <div id='userPanel'>
+                            <b>Users</b>
+                            <div id='users' class='panel'></div>
+                        </div>
+                        <div id='messagePanel'>
+                            <b>Messages</b>
+                            <div id='conversation' class='panel'></div>
+                            <input id='send' type='text'>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id='scratch'></div>
+    </body>
+</html>

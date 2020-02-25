@@ -142,7 +142,7 @@ class ChatHandler extends libp2p.BlankHandler {
         this.addMessage(msg, false);
         for (var [id, con] of this.hosting) {
             if (id != conid) {
-                libp2p.sendObject(conid, msg);
+                libp2p.sendObject(id, msg);
             }
         }
     }
@@ -163,7 +163,7 @@ class ChatHandler extends libp2p.BlankHandler {
                 libp2p.sendObject(conid, {name: 'users', users: users});
                 for (var [id, con] of this.hosting) {
                     if (id != conid) {
-                        libp2p.sendObject(conid, {name: 'addUser', user: cmd.user, peer: connection.peer});
+                        libp2p.sendObject(id, {name: 'addUser', user: cmd.user, peer: connection.peer});
                     }
                 }
             }

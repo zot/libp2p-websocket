@@ -1,4 +1,4 @@
-/* Copyright (c) 2020, William R. Burdick Jr.
+/* Copyright (c) 2020, William R. Burdick Jr., Roy Riggs, and TEAM CTHLUHU
  *
  * The MIT License (MIT)
  *

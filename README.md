@@ -7,7 +7,7 @@ This runs a simple websocket server and listens for websocket connections using 
 ## NOTE: THIS IS A WORK IN PROGRESS
 
 # LICENSE AND COPYRIGHT
-Copyright 2020 Bill Burdick. All rights reserved.
+Copyright (c) 2020, William R. Burdick Jr., Roy Riggs, and TEAM CTHLUHU. All rights reserved.
 Use of this source code is governed by an MIT-style
 license that can be found in the LICENSE file.
 

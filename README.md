@@ -7,13 +7,43 @@ This runs a simple websocket server and listens for websocket connections using 
 ## NOTE: THIS IS A WORK IN PROGRESS
 
 # LICENSE AND COPYRIGHT
-Copyright 2020 Bill Burdick. All rights reserved.
-Use of this source code is governed by a BSD-style
+Copyright (c) 2020, William R. Burdick Jr., Roy Riggs, and TEAM CTHLUHU. All rights reserved.
+Use of this source code is governed by an MIT-style
 license that can be found in the LICENSE file.
 
-# /ws/control
-Allow browser to control the relay over a websocket using a very simple binary protocol.
-When a connection closes, clean up all of its child connections.
+# Running
+
+`./libp2p-connection -browser chat.html` will start the relay and pop the chat example in a browser
+
+In development, you can use -files to point to the live html/js/css files you are editing. If you are in the src directory. For example, you should be able to use this command to pop out a development version of chat:
+```
+libp2p-connection -files html -files examples -browse chat.html
+```
+
+## Usage:
+```
+Usage of libp2p-connection:
+  -addr string
+        host address to listen on
+  -browse string
+        Browse a URL
+  -files value
+        add the contents of a directory to serve from /
+  -key string
+        specify peer key
+  -listen value
+        Adds a multiaddress to the listen list
+  -nopeers
+        clear the bootstrap peer list
+  -peer value
+        Adds a peer multiaddress to the bootstrap list
+  -port int
+        port to listen on (default 8888)
+```
+
+# libp2p-connection runs a websocket server on /ws/control
+This allows a browser to control the relay using a very simple binary protocol.
+When a connection closes, it cleans up all of its child connections.
 The client and server exchange these command messages, with the first byte of each message identifying the command.
 
 # CLIENT-TO-SERVER MESSAGES
@@ -36,33 +66,6 @@ The client and server exchange these command messages, with the first byte of ea
   Listener Closed:         [5][PROTOCOL: rest]        -- could not listen on PORT
   Peer Connection:         [6][ID: 8]                 -- connected to a peer with id ID
   Peer Connection Refused: [7][PEERID: rest]          -- connection to peer PEERID refused
-```
-
-# Running
-
-`./libp2p-connection -browser chat.html` will start the relay and pop the chat example in a browser
-
-In development, you can use -files to point to the live html/js/css files your are editing. If you are in the src directory, you should be able to use this command: `libp2p-connection -files html -files examples`
-
-## Usage:
-```
-Usage of libp2p-connection:
-  -addr string
-        host address to listen on
-  -browse string
-        Browse a URL
-  -files value
-        add the contents of a directory to serve from /
-  -key string
-        specify peer key
-  -listen value
-        Adds a multiaddress to the listen list
-  -nopeers
-        clear the bootstrap peer list
-  -peer value
-        Adds a peer multiaddress to the bootstrap list
-  -port int
-        port to listen on (default 8888)
 ```
 
 # Building

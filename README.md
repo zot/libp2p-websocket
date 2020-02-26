@@ -8,7 +8,7 @@ This runs a simple websocket server and listens for websocket connections using 
 
 # LICENSE AND COPYRIGHT
 Copyright 2020 Bill Burdick. All rights reserved.
-Use of this source code is governed by a BSD-style
+Use of this source code is governed by an MIT-style
 license that can be found in the LICENSE file.
 
 # Running

@@ -42,7 +42,10 @@ The client and server exchange these command messages, with the first byte of ea
 
 `./libp2p-connection -browser chat.html` will start the relay and pop the chat example in a browser
 
-In development, you can use -files to point to the live html/js/css files you are editing. If you are in the src directory, you should be able to use this command: `libp2p-connection -files html -files examples`
+In development, you can use -files to point to the live html/js/css files you are editing. If you are in the src directory. For example, you should be able to use this command to pop out a development version of chat:
+```
+libp2p-connection -files html -files examples -browse chat.html
+```
 
 ## Usage:
 ```

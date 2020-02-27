@@ -145,8 +145,20 @@ function stop(protocol) {
     ws.send(Uint8Array.from([cmsg.stop, ...utfEncoder.encode(protocol)]));
 }
 
+function connect(peerId, prot, frames, relay) {
+    relay = relay || false;
+    ws.send(Uint8Array.from([cmsg.connect,
+                             frames ? 1 : 0,
+                             relay ? 1 : 0,
+                             prot.length >> 8, prot.length & 0xFF, ...utfEncoder.encode(prot),
+                             ...utfEncoder.encode(peerId)]));
+}
+
 function discoveryConnect(peerId, prot, frames) {
-    ws.send(Uint8Array.from([cmsg.discoveryConnect, frames, prot.length >> 8, prot.length & 0xFF, ...utfEncoder.encode(prot), ...utfEncoder.encode(peerId)]));
+    ws.send(Uint8Array.from([cmsg.discoveryConnect,
+                             frames ? 1 : 0,
+                             prot.length >> 8, prot.length & 0xFF, ...utfEncoder.encode(prot),
+                             ...utfEncoder.encode(peerId)]));
 }
 
 // methods mimic the parameter order of the protocol
@@ -335,7 +347,7 @@ class TrackingHandler extends DelegatingHandler {
     }
 }
 
-function connect(urlStr, handler) {
+function start(urlStr, handler) {
     ws = new WebSocket(urlStr);
     ws.onopen = function open() {
         console.log("OPENED CONNECTION, WAITING FOR PEER ID AND NAT STATUS...");
@@ -449,7 +461,7 @@ function checkPeerId(str) {
 }
     
 export default {
-    connect,
+    start,
     BlankHandler,
     TrackingHandler,
     LoggingHandler,
@@ -460,6 +472,7 @@ export default {
     sendData,
     stop,
     listen,
+    connect,
     discoveryListen,
     discoveryConnect,
     getString,

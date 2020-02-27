@@ -71,7 +71,12 @@ class ChatHandler extends libp2p.BlankHandler {
     }
     // P2P API
     listening(protocol) {
-        $('#listenerStatus').value = this.peerId+this.protocol;
+        var sessionID = this.peerId+this.protocol;
+
+        //if (this.natStatus == 'private') {
+        //    sessionID = "/p2p-circuit/p2p/"+sessionID;
+        //}
+        $('#listenerStatus').value = sessionID;
     }
     // P2P API
     listenerConnection(conid, peerid, prot) {
@@ -96,6 +101,11 @@ class ChatHandler extends libp2p.BlankHandler {
         } else if (this.connection.connecting) {
             this.connectedToHost(conid, protocol, peerid);
         }
+    }
+    // P2P API
+    peerConnectionRefused(peerid, prot, msg) {
+        this.reset()
+        $('#toHostID').value = 'Failed to connect to '+peerid+' on protocol '+prot;
     }
     // P2P API
     discoveryPeerConnect(conid, protocol, peerid) {
@@ -291,7 +301,7 @@ function start() {
     if (document.port) {
         url += ":" + document.port;
     }
-    libp2p.connect(url + "ipfswsrelay", new libp2p.LoggingHandler(new libp2p.TrackingHandler(handler)));
+    libp2p.start(url + "ipfswsrelay", new libp2p.LoggingHandler(new libp2p.TrackingHandler(handler)));
     $('#host').onclick = ()=> {
         if (!handler.stopping) {
             if (handler.protocol) {
@@ -325,6 +335,11 @@ function start() {
             } else {
                 var peerId = peerIdProt.slice(0, slashIndex);
                 var prot = peerIdProt.slice(slashIndex);
+                var relay = peerIdProt.match(/^\/p2p-circuit\/p2p\/([^/]*)(\/.*)$/);
+                if (relay) {
+                    peerId = relay[1];
+                    prot = relay[2];
+                }
                 var invalidProt = libp2p.checkProt(prot);
 
                 if (invalidProt) {
@@ -332,7 +347,11 @@ function start() {
                 } else {
                     $('#host').disabled = true;
                     $('#connectStatus').value = 'WAITING TO CONNECT TO: '+peerIdProt;
-                    libp2p.discoveryConnect(peerId, prot, true);
+                    if (relay) {
+                        libp2p.connect(peerId, prot, true, true);
+                    } else {
+                        libp2p.discoveryConnect(peerId, prot, true);
+                    }
                     $('#connect').textContent = 'Abort Connection';
                     handler.connection = {connecting: true, peer: peerId, protocol: prot};
                 }

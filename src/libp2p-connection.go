@@ -47,6 +47,10 @@ import (
 	"github.com/libp2p/go-libp2p-core/host"
 	"github.com/libp2p/go-libp2p-core/protocol"
 	"github.com/libp2p/go-libp2p-discovery"
+	//basicHost "github.com/libp2p/go-libp2p/p2p/host/basic"
+	//circuit "github.com/libp2p/go-libp2p-circuit"
+	rly "github.com/libp2p/go-libp2p/p2p/host/relay"
+	//routing "github.com/libp2p/go-libp2p-routing"
 	autonat "github.com/libp2p/go-libp2p-autonat"
 	//pubsub "github.com/libp2p/go-libp2p-pubsub"
 	//pb "github.com/libp2p/go-libp2p-pubsub/pb"
@@ -74,7 +78,8 @@ const (
 	discoveryIndirectPrefix = "libp2p-connection-indirect"
 	discoveryCallbackPrefix = "libp2p-connection-callback"
 	dscTTL = 5 * time.Minute
-	callbackMonitorTTL = 1 * time.Minute
+	//callbackMonitorTTL = 1 * time.Minute
+	callbackMonitorTTL = 15 * time.Second
 	callbackFrequency = 1 * time.Minute
 )
 
@@ -293,27 +298,27 @@ func (r *libp2pRelay) Data(c *client, id uint64, data []byte) {
 }
 
 // CONNECT API METHOD
-func (r *libp2pRelay) Connect(c *client, prot string, peerid string, frames bool) {
-	fmt.Printf("Attempting to connect with protocol %v to peer %v\n", prot, peerid)
+func (r *libp2pRelay) Connect(c *client, prot string, peerid string, frames bool, relay bool) {
+	relayMsg := "out"
+	if relay {
+		relayMsg = ""
+	}
+	fmt.Printf("Attempting to connect with protocol %v to peer %v with%s relay\n", prot, peerid, relayMsg)
 	pid, err := peer.Decode(peerid)
 	if err != nil {
 		c.connectionRefused(err, peerid, prot)
 	}
-	//err = r.tryConnect(context.Background(), r.libp2pClient(c), pid, prot, frames)
-	//if err != nil {
-	//	c.connectionRefused(err, peerid, prot)
-	//}
-	r.retryLoop(c, prot, peerid, pid, frames, 0, func(con *libp2pConnection){}, func(err error) {
+	r.retryLoop(c, prot, peerid, pid, frames, relay, 0, func(con *libp2pConnection){}, func(err error) {
 		c.connectionRefused(err, peerid, prot)
 	})
 }
 
-func (r *libp2pRelay) retryLoop(c *client, prot string, peerid string, pid peer.ID, frames bool, count int, successFunc func(con *libp2pConnection), errFunc func(err error)) {
+func (r *libp2pRelay) retryLoop(c *client, prot string, peerid string, pid peer.ID, frames bool, relay bool, count int, successFunc func(con *libp2pConnection), errFunc func(err error)) {
 	if count > 4 {
 		errFunc(retryError("Failed after 5 attempts to find address for "+peerid))
 	} else {
 		fmt.Printf("Connect attempt #%d\n", count)
-		con, err := r.tryConnect(context.Background(), r.libp2pClient(c), pid, prot, frames)
+		con, err := r.tryConnect(context.Background(), r.libp2pClient(c), pid, prot, frames, relay, count)
 		if err == nil {
 			successFunc(con)
 			return
@@ -321,8 +326,8 @@ func (r *libp2pRelay) retryLoop(c *client, prot string, peerid string, pid peer.
 		_, ok := err.(retryError)
 		if ok {
 			go func() {
-				time.Sleep(250 * time.Millisecond)
-				r.retryLoop(c, prot, peerid, pid, frames, count + 1, successFunc, errFunc)
+				time.Sleep(1000 * time.Millisecond)
+				r.retryLoop(c, prot, peerid, pid, frames, relay, count + 1, successFunc, errFunc)
 			}()
 			return
 		} else {
@@ -375,6 +380,23 @@ func (r *libp2pRelay) DiscoveryListen(c *client, frames bool, prot string) {
 		case autonat.NATStatusPrivate:
 			c.writePackedMessage(smsgListening, prot)
 			r.monitorCallbackRequests(lc, frames, prot)
+			// use normal listen for relaying
+			//l := r.listen(smsgListening, smsgDscHostConnect, lc, prot, frames, nil)
+			//go func() {
+			//	closed := false
+			//	for !closed {
+			//		//addr, err := an.PublicAddr()
+			//		//if err == nil {
+			//		//	fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
+			//			r.printAddresses()
+			//			time.Sleep(20 * time.Second)
+			//			svcSync(lc, func() interface{} {
+			//				closed = l.closed
+			//				return nil
+			//			})
+			//		//}
+			//	}
+			//}()
 		}
 	}()
 }
@@ -406,8 +428,9 @@ func (r *libp2pRelay) monitorCallbackRequests(c *libp2pClient, frames bool, prot
 					break
 				}
 				fmt.Println("SEARCHING FOR PEERS ON "+cbprot)
-				// find peers for 
+				// find peers for a limited time
 				ctx, _ := context.WithDeadline(context.Background(), time.Now().Add(callbackMonitorTTL))
+				//ctx := context.Background()
 				peerChan, err := r.discovery.FindPeers(ctx, cbprot)
 				if err != nil {
 					logLine("Error finding peers: %s", err.Error())
@@ -456,7 +479,7 @@ func (r *libp2pRelay) DiscoveryConnect(c *client, frames bool, prot string, peer
 		cbprot := callback(pid, prot, frames)
 		var cancel context.CancelFunc
 
-		r.retryLoop(c, prot, peerid, pid, frames, 0, func(con *libp2pConnection) {connected.Set(true)}, func(err error) {
+		r.retryLoop(c, prot, peerid, pid, frames, false, 0, func(con *libp2pConnection) {connected.Set(true)}, func(err error) {
 			log.Printf("Could not make direct connection to %s on protocol %s.\nError: %s\nError: %#v\nwaiting for callback...", peerid, prot, err.Error(), err)
 		})
 		//go func() {
@@ -484,8 +507,8 @@ func (r *libp2pRelay) DiscoveryConnect(c *client, frames bool, prot string, peer
 
 				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(dscTTL))
 				fmt.Println("Advertising for callback: "+cbprot)
-				discovery.Advertise(ctx, r.discovery, cbprot, discovery.TTL(dscTTL))
-				<-ctx.Done() // wait for advertisement is to expire
+				discovery.Advertise(ctx, r.discovery, cbprot, discovery.TTL(dscTTL + 5 * time.Second))
+				<-ctx.Done() // wait for advertisement to expire
 			}
 			if !connected.Get() {
 				fmt.Printf("Could not find peer for %s after %d attempts\n", prot, count)
@@ -495,16 +518,47 @@ func (r *libp2pRelay) DiscoveryConnect(c *client, frames bool, prot string, peer
 	}
 }
 
-func (r *libp2pRelay) tryConnect(ctx context.Context, c *libp2pClient, peerID peer.ID, prot string, frames bool) (*libp2pConnection, error) {
-	addr, err := peerFinder.FindPeer(context.Background(), peerID)
-	if err != nil {
-		fmt.Printf("Error finding peer: %s\n", err.Error())
-		return nil, err
-	} else if len(addr.Addrs) == 0 {
-		return nil, retryError("No addresses for peer "+peerID.Pretty())
+func (r *libp2pRelay) tryConnect(ctx context.Context, c *libp2pClient, peerID peer.ID, prot string, frames bool, relay bool, count int) (*libp2pConnection, error) {
+	if relay {
+		//can, err := circuit.CanHop(ctx, r.host, peerID)
+		//if err != nil {
+		//	fmt.Println("CANNOT HOP,", err)
+		//	return nil, retryError(err.Error())
+		//}
+		//if !can {
+		//	//return nil, fmt.Errorf("Cannot reach %s with circuit-relay", peerID.Pretty())
+		//	fmt.Println("CANNOT HOP,", err)
+		//	return nil, retryError(err.Error())
+		//}
+		fmt.Println("Attempting circuit-relay connection")
+		//relayaddr, err := multiaddr.NewMultiaddr(bootstrapPeerStrings[0]+"/p2p-circuit/p2p/" + peerID.Pretty())
+		if count >= len(rly.DefaultRelays) {return nil, fmt.Errorf("No more public relays")}
+		relayaddr, err := multiaddr.NewMultiaddr(rly.DefaultRelays[count]+"/p2p-circuit/p2p/" + peerID.Pretty())
+		//relayaddr, err := multiaddr.NewMultiaddr("/p2p-circuit/p2p/" + peerID.Pretty())
+		checkErr(err)
+		fmt.Println("Using multiaddr:", relayaddr)
+		err = r.host.Connect(ctx, peer.AddrInfo{
+			ID: peerID,
+			Addrs: []multiaddr.Multiaddr{relayaddr},
+		})
+		if err != nil {
+			fmt.Println("Failed to connect over relay:\n", err)
+			return nil, retryError(err.Error())
+		}
+	} else {
+		addr, err := peerFinder.FindPeer(context.Background(), peerID)
+		if err != nil {
+			fmt.Printf("Error finding peer: %s\n", err.Error())
+			return nil, err
+		} else if len(addr.Addrs) == 0 {
+			return nil, retryError("No addresses for peer "+peerID.Pretty())
+		}
 	}
 	stream, err := r.host.NewStream(ctx, peerID, protocol.ID(prot))
-	if err != nil {return nil, err}
+	if err != nil {
+		fmt.Println("COULDN'T OPEN STREAM,", err)
+		return nil, err
+	}
 	fmt.Println("Connected")
 	var con *libp2pConnection
 	c.newConnection(smsgPeerConnection, prot, stream.Conn().RemotePeer().Pretty(), func(conID uint64) *connection {
@@ -517,6 +571,7 @@ func (r *libp2pRelay) tryConnect(ctx context.Context, c *libp2pClient, peerID pe
 
 func (r *libp2pRelay) printAddresses() {
 	fmt.Println("Addresses:")
+	//for _, addr := range r.host.(*basicHost.BasicHost).AllAddrs() {
 	for _, addr := range r.host.Addrs() {
 		fmt.Println("   ", addr.String()+"/p2p/"+r.peerID)
 	}
@@ -628,6 +683,7 @@ func initp2p(relay *libp2pRelay) {
 	goLog.SetAllLoggers(logging.WARNING)
 	goLog.SetLogLevel("rendezvous", "info")
 	ctx := context.Background()
+	//var routingDht atomic.Value
 	opts := []libp2p.Option{
 		libp2p.NATPortMap(),
 		//libp2p.DefaultTransports,
@@ -636,8 +692,17 @@ func initp2p(relay *libp2pRelay) {
 		//libp2p.EnableRelay(),
 		//libp2p.EnableAutoRelay(),
 		//libp2p.AddressFactory(func(addrs []ma.Multiaddr) []multiaddr.Multiaddr {
-		//  return append(addrs, multiaddr.StringCast(bsaddr.Encapsulate(multiaddr.StringCast("/p2p-circuit"))))
+		//	return append(addrs, multiaddr.StringCast(bsaddr.Encapsulate(multiaddr.StringCast("/p2p-circuit"))))
 		//}),
+		//libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
+		//	d, err := dht.New(ctx, h)
+		//	routingDht.Store(d)
+		//	return d, err
+		//}),
+		//libp2p.EnableRelay(circuit.OptHop),
+		//libp2p.EnableRelay(circuit.OptHop, circuit.OptActive),
+		//libp2p.DefaultStaticRelays(),
+		//libp2p.EnableRelay(),
 		libp2p.ListenAddrs([]multiaddr.Multiaddr(listenAddresses)...),
 	}
 	if peerKey != "" { // add peer key into opts if provided
@@ -663,35 +728,36 @@ func initp2p(relay *libp2pRelay) {
 		peeped := false
 		for {
 			status := an.Status()
-			if status != relay.natStatus || !peeped {
-				switch status {
-				case autonat.NATStatusUnknown:
-					fmt.Println("@@@ NAT status UNKNOWN")
-					addr, err := an.PublicAddr()
-					if err == nil {
-						fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
-						relay.printAddresses()
+			svcSync(relay, func() interface{} {
+				if status != relay.natStatus || !peeped {
+					switch status {
+					case autonat.NATStatusUnknown:
+						fmt.Println("@@@ NAT status UNKNOWN")
+						addr, err := an.PublicAddr()
+						if err == nil {
+							fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
+							relay.printAddresses()
+						}
+					case autonat.NATStatusPublic:
+						fmt.Println("@@@ NAT status PUBLIC")
+						addr, err := an.PublicAddr()
+						if err == nil {
+							fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
+							relay.printAddresses()
+						}
+					case autonat.NATStatusPrivate:
+						fmt.Println("@@@ NAT status PRIVATE")
 					}
-				case autonat.NATStatusPublic:
-					fmt.Println("@@@ NAT status PUBLIC")
-					addr, err := an.PublicAddr()
-					if err == nil {
-						fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
-						relay.printAddresses()
-					}
-				case autonat.NATStatusPrivate:
-					fmt.Println("@@@ NAT status PRIVATE")
-				}
-				relay.natStatus = status
-				if status != autonat.NATStatusUnknown {
-					svc(relay, func() {
+					if status != autonat.NATStatusUnknown {
+						relay.natStatus = status
 						for _, f := range relay.natActions {
 							f()
 						}
 						relay.natActions = []func(){}
-					})
+					}
 				}
-			}
+				return nil
+			})
 			peeped = true
 			time.Sleep(250 * time.Millisecond)
 		}
@@ -705,13 +771,14 @@ func initp2p(relay *libp2pRelay) {
 
 	autonatSvc.NewAutoNATService(context.Background(), myHost)
 
-	// Start a DHT, for use in peer discovery. We can't just make a new DHT
-	// client because we want each peer to maintain its own local copy of the
-	// DHT, so that the bootstrapping node of the DHT can go down without
-	// inhibiting future peer discovery.
+//	// Start a DHT, for use in peer discovery. We can't just make a new DHT
+//	// client because we want each peer to maintain its own local copy of the
+//	// DHT, so that the bootstrapping node of the DHT can go down without
+//	// inhibiting future peer discovery.
 	kademliaDHT, err := dht.New(ctx, myHost)
+//	kademliaDHT := routingDht.Load().(*dht.IpfsDHT)
 	checkErr(err)
-
+//
 	peerFinder = kademliaDHT
 	// Bootstrap the DHT. In the default configuration, this spawns a Background
 	// thread that will refresh the peer table every five minutes.
@@ -743,8 +810,12 @@ func initp2p(relay *libp2pRelay) {
 	// We use a rendezvous point "meet me here" to announce our location.
 	// This is like telling your friends to meet you at the Eiffel Tower.
 	logger.Info("Announcing ourselves...")
+	//relay.discovery = discovery.NewRoutingDiscovery(kademliaDHT)
 	relay.discovery = discovery.NewRoutingDiscovery(kademliaDHT)
-	discovery.Advertise(ctx, relay.discovery, rendezvousString, discovery.TTL(1 * time.Minute))
+	//err := myDHT.PutValue(context.Background(), "p2pmud", []byte(relay.host.ID().Pretty()))
+	//checkErr(err)
+	//mudChan := myDHT.Search(context.Background(), "p2pmud")
+	//discovery.Advertise(ctx, relay.discovery, rendezvousString, discovery.TTL(1 * time.Minute))
 	//logger.Debug("Successfully announced!")
 
 	// Now, look for others who have announced

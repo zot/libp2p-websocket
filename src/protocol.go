@@ -44,7 +44,7 @@ messages, with the first byte of each message identifying the command.
   Stop:        [1][PROTOCOL: rest]            -- stop listening on PORT
   Close:       [2][ID: 8]                     -- close a stream
   Data:        [3][ID: 8][data: rest]         -- write data to stream
-  Connect:     [4][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- connect to another peer (frames optional)
+  Connect:     [4][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
   Dsc Listen:  [5][FRAMES: 1][PROTOCOL: rest] -- host a protocol using discovery
   Dsc Connect: [6][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- request a connection to a peer potentially requesting a callback
 ```
@@ -206,7 +206,7 @@ type protocolHandler interface {
 	Stop(c *client, protocol string)
 	Close(c *client, conID uint64)
 	Data(c *client, conID uint64, data []byte)
-	Connect(c *client, protocol string, peerID string, frames bool)
+	Connect(c *client, protocol string, peerID string, frames bool, relay bool)
 	CleanupClosed(c *connection)
 }
 
@@ -232,6 +232,14 @@ func (t messageType) clientName() string {
 
 func (t messageType) serverName() string {
 	return smsgNames[t]
+}
+
+func svcSync(s chanSvc, code func() interface{}) interface{} {
+	result := make(chan interface{})
+	svc(s, func() {
+		result <- code()
+	})
+	return <-result
 }
 
 func svc(s chanSvc, code func()) {
@@ -427,7 +435,7 @@ func (c *client) readWebsocket(r *relay) {
 				continue
 			}
 			if err == nil {
-				fmt.Printf("@@@ READ MESSAGE %s: %#v\n", messageType(data[0]).clientName(), data[1:])
+				fmt.Printf("@@@ READ MESSAGE %s: %X\n", messageType(data[0]).clientName(), data[1:])
 			} else {
 				fmt.Println("ERROR READING WEB SOCKET", err)
 			}
@@ -453,10 +461,13 @@ func (c *client) readWebsocket(r *relay) {
 							r.Data(c, binary.BigEndian.Uint64(body[:8]), body[8:])
 						}
 					case cmsgConnect:
-						if c.assert(len(body) > 3, "Bad message format for cmsgConnect") {
-							prot, peerid := getString(body[1:])
-							fmt.Println("Prot: "+prot+", Peer id: "+string(peerid))
-							r.Connect(c, prot, string(peerid), body[0] != 0)
+						if c.assert(len(body) > 4, "Bad message format for cmsgConnect") {
+							frames := body[0] != 0
+							relay := body[1] != 0
+							prot, afterProt := getString(body[2:])
+							peerid := string(afterProt)
+							fmt.Println("Prot:"+prot+", Peer id: "+peerid+", Relay: "+boolString(relay))
+							r.Connect(c, prot, peerid, frames, relay)
 						}
 					case cmsgDscListen:
 						if c.assert(len(body) > 4, "Bad message formag for cmsgDscListen") {
@@ -517,7 +528,7 @@ func (c *client) readStreamFrames(con *connection) {
 				err = reallyReadFull(con.stream, body[:len])
 			}
 			if err == nil {
-				fmt.Printf("RECEIVED %d BYTES: %#v\n", len, con.readBuf[0:9 + len])
+				fmt.Printf("RECEIVED %d BYTES: %X\n", len, con.readBuf[0:9 + len])
 			}
 			c.receiveFrame(con, con.readBuf[:len + 9], err)
 		}
@@ -559,7 +570,7 @@ func (c *client) readStreamData(con *connection) {
 					con.cleanup()
 				})
 			} else {
-				fmt.Printf("RECEIVED %d BYTES: %#v\n", len, con.readBuf[0:9 + len])
+				fmt.Printf("RECEIVED %d BYTES: %X\n", len, con.readBuf[0:9 + len])
 				c.receiveFrame(con, con.readBuf[0:9 + len], err)
 			}
 		}
@@ -707,8 +718,8 @@ func (r *relay) Data(c *client, conID uint64, data []byte) {
 	r.handler.Data(c, conID, data)
 }
 
-func (r *relay) Connect(c *client, protocol string, peerID string, frames bool) {
-	r.handler.Connect(c, protocol, peerID, frames)
+func (r *relay) Connect(c *client, protocol string, peerID string, frames bool, relay bool) {
+	r.handler.Connect(c, protocol, peerID, frames, relay)
 }
 
 func (r *relay) DiscoveryListen(c *client, frames bool, prot string) {
@@ -795,4 +806,11 @@ func newBuf(len int) *bytes.Buffer {
 
 func array(item ...interface{}) []interface{} {
 	return item[:]
+}
+
+func boolString(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }

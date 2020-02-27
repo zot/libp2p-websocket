@@ -43,6 +43,7 @@ input {
 #chatsWait {
 	border: solid black 2px;
 	background: lightgray;
+	color: black;
 }
 body.showGui #chatsWait {
 	display: none;

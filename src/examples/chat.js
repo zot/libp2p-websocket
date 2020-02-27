@@ -65,6 +65,7 @@ class ChatHandler extends libp2p.BlankHandler {
         $('#peerID').textContent = peerId;
         console.log('IDENT: ', peerId, ' ', this.natStatus);
         document.body.classList.add('hasNat');
+        this.reset();
         if (this.user) {
             this.showGui();
         }
@@ -77,6 +78,10 @@ class ChatHandler extends libp2p.BlankHandler {
         //    sessionID = "/p2p-circuit/p2p/"+sessionID;
         //}
         $('#listenerStatus').value = sessionID;
+        $('#toHostID').disabled = true;
+        this.connection.listening = true;
+        delete this.connection.disconnected;
+        this.showHideChats(true)
     }
     // P2P API
     listenerConnection(conid, peerid, prot) {
@@ -90,7 +95,7 @@ class ChatHandler extends libp2p.BlankHandler {
     discoveryAwaitingCallback(protocol) {
         if (this.connection.connecting) {
             $('#connectStatus').textContent = 'Awaiting callback for '+protocol;
-            $('#connectDiv').classList.add('connected');
+            this.showHideChats(true);
         }
     }
     // P2P API
@@ -210,6 +215,20 @@ class ChatHandler extends libp2p.BlankHandler {
         this.hosting.set(conid, {connectionId: conid, peer: peerid, protocol: prot});
         this.connection = {connected: true, hosted: true};
     }
+    showHideChats(show) {
+        if (show) {
+            $('#chatsBody').classList.add('showChats');
+            $('#showChats').textContent = 'Show Session Info';
+        } else {
+            $('#chatsBody').classList.remove('showChats');
+            $('#showChats').textContent = 'Show Chats';
+        }
+        if (this.connection.disconnected) {
+            $('#chatsBody').classList.remove('connected');
+        } else {
+            $('#chatsBody').classList.add('connected');
+        }
+    }
     showUsers() {
         var users = [];
 
@@ -240,7 +259,7 @@ class ChatHandler extends libp2p.BlankHandler {
     connectedToHost(conid, protocol, peerid) {
         this.connection = {connected: true, connectionId: conid, peer: peerid, protocol: protocol};
         $('#connectStatus').textContent = 'Connected to '+peerid+protocol;
-        $('#connectDiv').classList.add('connected');
+        this.showHideChats(true);
         $('#connect').textContent = 'Disconnect';
         libp2p.sendObject(conid, {name: 'user', user: this.user});
     }
@@ -248,12 +267,13 @@ class ChatHandler extends libp2p.BlankHandler {
         this.protocol = null;
         this.stopping = false;
         this.connection = {disconnected: true};
-        $('#connectDiv').classList.remove('connected');
+        this.showHideChats(false);
         $('#host').textContent = 'Host';
         $('#host').disabled = false;
         $('#connect').disabled = false;
         $('#connect').textContent = 'Connect';
         $('#toHostID').value = '';
+        $('#toHostID').disabled = false;
         $('#listenerStatus').value = '';
         $('#send').value = '';
         this.userMap = new Map();
@@ -261,6 +281,10 @@ class ChatHandler extends libp2p.BlankHandler {
             this.userMap.set(this.peerId, this.user);
             this.showUsers();
         }
+        $('#relayForHost').disabled = this.natStatus != 'public';
+        $('#relayRequestHost').disabled = this.natStatus != 'public';
+        $('#useRelay').disabled = this.natStatus == 'public';
+        $('#relayPeer').disabled = this.natStatus == 'public';
     }
     setUser(name) {
         if (name != "" && name != this.user) {
@@ -275,6 +299,16 @@ class ChatHandler extends libp2p.BlankHandler {
         document.body.classList.add('showGui');
         this.userMap.set(this.peerId, this.user);
         this.showUsers();
+    }
+    invalidConnection(msg) {
+        $('#toHostID').value += ": " + msg;
+        this.showHideChats(false);
+    }
+    relayFor(requestHost) {
+        alert('RELAY FOR '+requestHost);
+    }
+    useRelay(relayPeer) {
+        alert('USE RELAY '+relayPeer);
     }
 }
 
@@ -331,7 +365,7 @@ function start() {
             var slashIndex = peerIdProt.indexOf('/');
 
             if (slashIndex == -1) {
-                invalidConnection('BAD CONNECT FORMAT: '+peerIdProt);
+                handler.invalidConnection('BAD CONNECT FORMAT: '+peerIdProt);
             } else {
                 var peerId = peerIdProt.slice(0, slashIndex);
                 var prot = peerIdProt.slice(slashIndex);
@@ -343,7 +377,7 @@ function start() {
                 var invalidProt = libp2p.checkProt(prot);
 
                 if (invalidProt) {
-                    invalidConnection(invalidProt);
+                    handler.invalidConnection(invalidProt);
                 } else {
                     $('#host').disabled = true;
                     $('#connectStatus').value = 'WAITING TO CONNECT TO: '+peerIdProt;
@@ -374,11 +408,9 @@ function start() {
             handler.setUser($('#user').value);
         }
     };
-}
-
-function invalidConnection(msg) {
-    $('#toHostID').value += ": " + msg;
-    $('#connectDiv').classList.remove('connected');
+    $('#showChats').onclick = evt=> handler.showHideChats(!$('#chatsBody').classList.contains('showChats'));
+    $('#relayForHost').onclick = evt=> handler.relayFor($('#relayRequestHost').value);
+    $('#useRelay').onclick = evt=> handler.useRelay($('#relayPeer').value);
 }
 
 window.onload = start;

@@ -38,7 +38,7 @@
                     <div id='awaitingPeer'>WAITING FOR PEER STATUS</div>
                 </div>
                 <div id='chatsBody'>
-                    <div id='hostDiv'>
+                    <div id='hostDiv' class='field'>
                         <button id='host'>Host</button>
                         <input id='listenerStatus' type='text' readonly='true'>
                     </div>
@@ -46,6 +46,11 @@
                         <button id='connect'>Connect</button>
                         To peer: <input id='toHostID' type='text'>
                         <span id='connectStatus'></span>
+                    </div>
+                    <button id='showChats'>Show Chats</button>
+                    <div id='connectionPanel' class='panel'>
+                        <div class='field'><button id='relayForHost'>Relay for</button> <span>Host Peer: </span> <input id='relayRequestHost' type='text'></div>
+                        <div class='field'><button id='useRelay'>Connect to</button> <span>Relay Peer: </span><input id='relayPeer' type='text'></div>
                     </div>
                     <div id='chatPanel'>
                         <div id='userPanel'>

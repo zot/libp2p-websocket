@@ -31,6 +31,15 @@ body {
 	font-size: 24px;
 	color: #dddddd;
 }
+.field {
+    display: flex;
+}
+.field > :not(:first-child) {
+    margin-left: 1ex;
+}
+.field > input {
+    flex-grow: 1;
+}
 input {
 	background-color: #333333;
 	color: #dddddd;
@@ -52,6 +61,7 @@ body.showGui #chatsWait {
 	overflow: auto;
 	border: solid gray 2px;
 	border-radius: 5px;
+    padding: 0.5ex;
 }
 #chatsBody {
 	display: none;
@@ -73,9 +83,6 @@ body.showGui #chatsBody {
 #send {
 	width: 100%;
 }
-#hostDiv {
-	display: flex;
-}
 #listenerStatus {
 	flex-grow: 1;
 	margin-left: 1ex;
@@ -96,7 +103,7 @@ body.showGui #chatsBody {
 #connectStatus {
 	display: none;
 }
-.connected #connectStatus {
+.showChats #connectStatus {
 	display: initial;
 }
 #userDiv {
@@ -111,7 +118,16 @@ body.showGui #chatsBody {
 .hasNat #awaitingPeer {
 	display: none;
 }
+#connectionPanel {
+    
+}
+.showChats #connectionPanel {
+    display: none;
+}
 #chatPanel {
+	display: none;
+}
+.showChats #chatPanel {
 	display: flex;
 	height: 50ex;
 }

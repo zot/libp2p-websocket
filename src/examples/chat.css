@@ -33,9 +33,19 @@ body {
 }
 .field {
     display: flex;
+    white-space: nowrap;
 }
-.field > :not(:first-child) {
-    margin-left: 1ex;
+.field > :first-child::before { /* sets the line height in addition to adding a margin */
+    /*content: "";*/
+}
+.field > ::before { /* sets the line height in addition to adding a margin */
+    /*content: "\00a0";*/
+}
+.private-only {
+    display: none;
+}
+.privateNAT .private-only {
+    display: inherit;
 }
 .field > input {
     flex-grow: 1;
@@ -85,8 +95,9 @@ body.showGui #chatsBody {
 }
 #listenerStatus {
 	flex-grow: 1;
-	margin-left: 1ex;
+	/*margin-left: 1ex;*/
 }
+/*
 #connectDiv {
 	display: flex;
 }
@@ -97,8 +108,22 @@ body.showGui #chatsBody {
 	flex-grow: 1;
 	margin-left: 1ex;
 }
+*/
 .connected #toHostID {
 	display: none;
+}
+.active #connectDiv,
+.active #hostDiv,
+.relay #connectDiv,
+.relay #hostDiv,
+.publicNAT.active #relayPanel,
+#relayPanel {
+    display: none;
+}
+.active.peer #connectDiv,
+.active.host #hostDiv,
+.publicNAT #relayPanel {
+    display: inherit;
 }
 #connectStatus {
 	display: none;
@@ -118,16 +143,13 @@ body.showGui #chatsBody {
 .hasNat #awaitingPeer {
 	display: none;
 }
-#connectionPanel {
-    
-}
-.showChats #connectionPanel {
-    display: none;
-}
-#chatPanel {
+#chatPanel,
+#connectionPanel,
+.relay.showChats #connectionPanel {
 	display: none;
 }
-.showChats #chatPanel {
+.showChats #chatPanel,
+.relay #connectionPanel {
 	display: flex;
 	height: 50ex;
 }
@@ -143,4 +165,16 @@ body.showGui #chatsBody {
 	display: flex;
 	flex-flow: column;
 	flex-grow: 1;
+}
+/*
+#relayPanel {
+    display: none;
+}
+.publicNAT #relayHosting {
+    display: flex;
+	flex-flow: column;
+}
+*/
+#relayingPeers {
+    white-space: pre;
 }

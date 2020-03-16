@@ -29,7 +29,7 @@
  
 ```
   Listen:      [0][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
-  Stop:        [1][PROTOCOL: rest]            -- stop listening on PORT
+  Stop:        [1][PROTOCOL: rest]            -- stop listening to PROTOCOL
   Close:       [2][ID: 8]                     -- close a stream
   Data:        [3][ID: 8][data: rest]         -- write data to stream
   Connect:     [4][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- connect to another peer (frames optional)
@@ -56,7 +56,7 @@
 */
 "use strict"
 const protPat = /^\/x\//
-const peerIdPat = /^[^/]+$/
+const peerIDPat = /^[^/]+$/
 const bytes = new ArrayBuffer(8);
 const numberConverter = new DataView(bytes);
 
@@ -93,7 +93,7 @@ const smsg = Object.freeze({
 });
 
 var ws;
-var peerId;
+var peerID;
 var utfDecoder = new TextDecoder("utf-8");
 var utfEncoder = new TextEncoder("utf-8");
 
@@ -104,9 +104,9 @@ function enumFor(enumObj, value) {
     return null;
 }
 
-function sendObject(conid, object, callback) {
+function sendObject(conID, object, callback) {
     console.log("SENDING COMMAND: "+JSON.stringify(object), object);
-    sendString(conid, JSON.stringify(object), callback);
+    sendString(conID, JSON.stringify(object), callback);
 }
 
 function sendString(conID, str, cb) {
@@ -122,6 +122,17 @@ function sendData(conID, data, cb) {
     dv.setBigUint64(1, conID);
     buf.set(data, 9)
     ws.send(buf, cb);
+}
+
+function connectionError(conID, code, msg, isCatastrophic, extra) {
+    var errObj = {name: 'error', code, error: msg};
+
+    if (extra) {
+        Object.assign(errObj, extra);
+    }
+    console.error('Error on connection, '+msg+(isCatastrophic ? ', closing connection, ' : '')+', extra information:', extra);
+    sendObject(conID, errObj);
+    if (isCatastrophic) close(conID);
 }
 
 function close(conID, cb) {
@@ -145,35 +156,35 @@ function stop(protocol) {
     ws.send(Uint8Array.from([cmsg.stop, ...utfEncoder.encode(protocol)]));
 }
 
-function connect(peerId, prot, frames, relay) {
+function connect(peerID, prot, frames, relay) {
     relay = relay || false;
     ws.send(Uint8Array.from([cmsg.connect,
                              frames ? 1 : 0,
                              relay ? 1 : 0,
                              prot.length >> 8, prot.length & 0xFF, ...utfEncoder.encode(prot),
-                             ...utfEncoder.encode(peerId)]));
+                             ...utfEncoder.encode(peerID)]));
 }
 
-function discoveryConnect(peerId, prot, frames) {
+function discoveryConnect(peerID, prot, frames) {
     ws.send(Uint8Array.from([cmsg.discoveryConnect,
                              frames ? 1 : 0,
                              prot.length >> 8, prot.length & 0xFF, ...utfEncoder.encode(prot),
-                             ...utfEncoder.encode(peerId)]));
+                             ...utfEncoder.encode(peerID)]));
 }
 
 // methods mimic the parameter order of the protocol
 class BlankHandler {
-    ident(publicPeer, peerId) {}
-    listenerConnection(id, peerid, prot) {}
-    connectionClosed(id, msg) {}
-    data(id, data) {}
+    ident(publicPeer, peerID, addresses) {}
+    listenerConnection(conID, peerID, prot) {}
+    connectionClosed(conID, msg) {}
+    data(conID, data, obj) {}  // obj is optionally a JSON object
     listenRefused(protocol) {}
     listenerClosed(protocol) {}
-    peerConnection(conid, peerid, prot) {}
-    peerConnectionRefused(peerid, prot, msg) {}
+    peerConnection(conID, peerID, prot) {}
+    peerConnectionRefused(peerID, prot, msg) {}
     error(msg) {}
-    discoveryHostConnect(conid, peerid, prot) {}
-    discoveryPeerConnect(conid, peerid, prot) {}
+    discoveryHostConnect(conID, peerID, prot) {}
+    discoveryPeerConnect(conID, peerID, prot) {}
     listening(protocol) {}
     discoveryAwaitingCallback(protocol) {}
 }
@@ -182,44 +193,130 @@ class DelegatingHandler {
     constructor(delegate) {
         this.delegate = delegate;
     }
-    ident(publicPeer, peerId) {
-        this.delegate.ident(publicPeer, peerId);
+    ident(publicPeer, peerID, addresses) {
+        this.delegate && this.delegate.ident(publicPeer, peerID, addresses);
     }
-    listenerConnection(id, peerid, prot) {
-        this.delegate.listenerConnection(id, peerid, prot);
+    listenerConnection(conID, peerID, prot) {
+        this.delegate && this.delegate.listenerConnection(conID, peerID, prot);
     }
-    connectionClosed(id, msg) {
-        this.delegate.connectionClosed(id, msg);
+    connectionClosed(conID, msg) {
+        this.delegate && this.delegate.connectionClosed(conID, msg);
     }
-    data(id, data) {
-        this.delegate.data(id, data);
+    data(conID, data, obj) {
+        this.delegate && this.delegate.data(conID, data, obj);
     }
     listenRefused(protocol) {
-        this.delegate.listenRefused(protocol);
+        this.delegate && this.delegate.listenRefused(protocol);
     }
     listenerClosed(protocol) {
-        this.delegate.listenerClosed(protocol);
+        this.delegate && this.delegate.listenerClosed(protocol);
     }
-    peerConnection(conid, peerid, prot) {
-        this.delegate.peerConnection(conid, peerid, prot);
+    peerConnection(conID, peerID, prot) {
+        this.delegate && this.delegate.peerConnection(conID, peerID, prot);
     }
-    peerConnectionRefused(peerid, prot, msg) {
-        this.delegate.peerConnectionRefused(peerid, prot, msg);
+    peerConnectionRefused(peerID, prot, msg) {
+        this.delegate && this.delegate.peerConnectionRefused(peerID, prot, msg);
     }
     error(msg) {
-        this.delegate.error(msg);
+        this.delegate && this.delegate.error(msg);
     }
-    discoveryHostConnect(conid, peerid, prot) {
-        this.delegate.discoveryHostConnect(conid, peerid, prot);
+    discoveryHostConnect(conID, peerID, prot) {
+        this.delegate && this.delegate.discoveryHostConnect(conID, peerID, prot);
     }
-    discoveryPeerConnect(conid, peerid, prot) {
-        this.delegate.discoveryPeerConnect(conid, peerid, prot);
+    discoveryPeerConnect(conID, peerID, prot) {
+        this.delegate && this.delegate.discoveryPeerConnect(conID, peerID, prot);
     }
     listening(protocol) {
-        this.delegate.listening(protocol);
+        this.delegate && this.delegate.listening(protocol);
     }
     discoveryAwaitingCallback(protocol) {
-        this.delegate.discoveryAwaitingCallback(protocol);
+        this.delegate && this.delegate.discoveryAwaitingCallback(protocol);
+    }
+    insertDelegatingHandler(hand) {
+        hand.delegate = this.delegate;
+        this.delegate = hand;
+    }
+}
+
+class CommandHandler extends DelegatingHandler {
+    constructor(delegate, connections, commands, delegateData, protocols) {
+        super(delegate);
+        this.connections = connections || this;
+        this.commandConnections = new Set();
+        this.protocols = new Set(protocols);
+        if (commands instanceof Set) {
+            this.commands = commands;
+        } else if (Array.isArray(commands)) {
+            this.commands = new Set(commands);
+        } else if (commands instanceof Map) {
+            throw new Error('commands is not a map');
+        } else if (typeof commands == 'object') {
+            this.commands = new Set(Object.keys(commands));
+        } else {
+            throw new Error('commands is not an object');
+        }
+        this.delegateData = delegateData;
+    }
+    // P2P API
+    listenerConnection(conID, peerID, prot) {
+        if (this.protocols.has(prot)) {
+            this.commandConnections.add(conID);
+        }
+        super.listenerConnection(conID, peerID, prot);
+    }
+    // P2P API
+    connectionClosed(conID, msg) {
+        this.commandConnections.delete(conID);
+        super.connectionClosed(conID, msg);
+    }
+    peerConnection(conID, peerID, prot) {
+        if (this.protocols.has(prot)) {
+            this.commandConnections.add(conID);
+        }
+        super.peerConnection(conID, peerID, prot);
+    }
+    // P2P API
+    data(conID, data, obj) { // only handle comands for this handler's connections
+        var info = getConnectionInfo(this.connections, conID);
+
+        if (this.shouldHandleCommand(info, data, obj)) {
+            if (typeof obj == 'undefined') {
+                try {
+                    obj = JSON.parse(getString(data));
+                } catch (err) {
+                    if (this.delegateData) {
+                        return super.data(conID, data);
+                    }
+                    return connectionError(conID, relayErrors.badCommand, 'Bad command, could not parse JSON', true);
+                }
+            }
+            try {
+                if (this.handleCommand(info, data, obj)) {
+                    return;
+                }
+                if (this.delegateData) {
+                    super.data(conID, data, obj);
+                } else {
+                    connectionError(conID, relayErrors.unknownCommand, 'Unknown command: '+obj.name, true);
+                }
+            } catch (err) {
+                connectionError(conID, relayErrors.error, 'Error during command "'+obj.name+'":\n'+err.stack, true);
+            }
+        } else {
+            super.data(conID, data, obj);
+        }
+    }
+    shouldHandleCommand(info, data, obj) {
+        return this.commandConnections.has(info.conID);
+    }
+    // override this to change how commands are executed
+    handleCommand(info, data, obj) {
+        if (this.commands.has(obj.name)) {
+            console.log("Handling command:", obj);
+            this[obj.name](info, obj);
+            return true;
+        }
+        return false;
     }
 }
 
@@ -231,120 +328,377 @@ class LoggingHandler extends DelegatingHandler {
     constructor(delegate) {
         super(delegate);
     }
-    ident(publicPeer, peerId) {
+    ident(publicPeer, peerID, addresses) {
         receivedMessageArgs('ident', arguments);
-        this.delegate.ident(publicPeer, peerId);
+        super.ident(publicPeer, peerID, addresses);
     }
-    listenerConnection(id, peerid, prot) {
+    listenerConnection(conID, peerID, prot) {
         receivedMessageArgs('listenerConnection', arguments);
-        this.delegate.listenerConnection(id, peerid, prot);
+        super.listenerConnection(conID, peerID, prot);
     }
-    connectionClosed(id, msg) {
+    connectionClosed(conID, msg) {
         receivedMessageArgs('connectionClosed', arguments);
-        this.delegate.connectionClosed(id, msg);
+        super.connectionClosed(conID, msg);
     }
-    data(id, data) {
+    data(conID, data, obj) {
         receivedMessageArgs('data', arguments);
-        this.delegate.data(id, data);
+        super.data(conID, data, obj);
     }
     listenRefused(protocol) {
         receivedMessageArgs('listenRefused', arguments);
-        this.delegate.listenRefused(protocol);
+        super.listenRefused(protocol);
     }
     listenerClosed(protocol) {
         receivedMessageArgs('listenerClosed', arguments);
-        this.delegate.listenerClosed(protocol);
+        super.listenerClosed(protocol);
     }
-    peerConnection(conid, peerid, prot) {
+    peerConnection(conID, peerID, prot) {
         receivedMessageArgs('peerConnection', arguments);
-        this.delegate.peerConnection(conid, peerid, prot);
+        super.peerConnection(conID, peerID, prot);
     }
-    peerConnectionRefused(peerid, prot, msg) {
+    peerConnectionRefused(peerID, prot, msg) {
         receivedMessageArgs('peerConnectionRefused', arguments);
-        this.delegate.peerConnectionRefused(peerid, prot, msg);
+        super.peerConnectionRefused(peerID, prot, msg);
     }
     error(msg) {
         receivedMessageArgs('error', arguments);
-        this.delegate.error(msg);
+        super.error(msg);
     }
-    discoveryHostConnect(conid, peerid, prot) {
+    discoveryHostConnect(conID, peerID, prot) {
         receivedMessageArgs('discoveryHostConnect', arguments);
-        this.delegate.discoveryHostConnect(conid, peerid, prot);
+        super.discoveryHostConnect(conID, peerID, prot);
     }
-    discoveryPeerConnect(conid, peerid, prot) {
+    discoveryPeerConnect(conID, peerID, prot) {
         receivedMessageArgs('discoveryPeerConnect', arguments);
-        this.delegate.discoveryPeerConnect(conid, peerid, prot);
+        super.discoveryPeerConnect(conID, peerID, prot);
     }
     listening(protocol) {
         receivedMessageArgs('listening', arguments);
-        this.delegate.listening(protocol)
+        super.listening(protocol)
     }
     discoveryAwaitingCallback(protocol) {
         receivedMessageArgs('discoveryAwaitingCallback', arguments);
-        this.delegate.discoveryAwaitingCallback(protocol);
+        super.discoveryAwaitingCallback(protocol);
+    }
+}
+
+class ConnectionInfo {
+    constructor(conID, peerID, protocol, incoming) {
+        this.conID = conID;
+        this.peerID = peerID;
+        this.protocol = protocol;
+        this.incoming = incoming;
+        this.outgoing = !incoming;
+    }
+    isRelayHost() {
+    }
+    isRelayPeer() {
+    }
+    relayInfo() {
+        var pending = !this.isRelayPeer() && !isRelayHost();
+        var pendingStr = pending ? "PENDING " : " ";
+        var html = pendingStr + this.peerID;
+
+        if (this.hostedProtocols && this.hostedProtocols.size) {
+            var prots = [...this.hostedProtocols];
+
+            prots.sort();
+            html += "HOSTING "+prots.join(", ");
+        }
+        return {
+            pending,
+            html,
+            peerID: this.peerID,
+            rank: this.isRelayHost() ? 1 : pending ? 3 : 2,
+            hosting: this.hostedProtocols,
+        };
     }
 }
 
 class TrackingHandler extends DelegatingHandler {
-    constructor(delegate) {
+    constructor(delegate, connections) {
         super(delegate);
-        delegate.incomingConnections = new Map();
-        delegate.outgoingConnections = new Map();
-        delegate.natStatus = natStatus.unknown;
-        delegate.listeningTo = new Set();
-        delegate.awaitingCallbacks = new Set();
+        this.connections = connections = connections || delegate || {};
+        connections.infoByConID = new Map();
+        connections.conIDsByPeerID = new Map();
+        connections.natStatus = natStatus.unknown;
+        connections.listeningTo = new Set();
+        //connections.awaitingCallbacks = new Set();
     }
-    ident(publicPeer, peerId) {
-        this.delegate.peerId = peerId;
-        this.delegate.natStatus = publicPeer ? natStatus.public : natStatus.private;
-        super.ident(publicPeer, peerId);
+    ident(publicPeer, peerID, addresses) {
+        this.connections.peerID = peerID;
+        this.connections.natStatus = publicPeer ? natStatus.public : natStatus.private;
+        super.ident(publicPeer, peerID, addresses);
     }
-    listenerConnection(id, peerid, prot) {
-        this.delegate.incomingConnections.set(id, prot);
-        super.listenerConnection(id, peerid, prot);
+    listenerConnection(conID, peerID, prot) {
+        var con = new ConnectionInfo(conID, peerID, prot, true);
+        var ids = this.connections.conIDsByPeerID.get(peerID);
+
+        this.connections.infoByConID.set(conID, con);
+        if (!ids) {
+            ids = new Set();
+            this.connections.conIDsByPeerID.set(peerID, ids);
+        }
+        ids.add(conID);
+        super.listenerConnection(conID, peerID, prot);
     }
-    connectionClosed(id, msg) {
-        this.delegate.incomingConnections.delete(id);
-        this.delegate.outgoingConnections.delete(id);
-        super.connectionClosed(id, msg);
-    }
-    data(id, data) {
-        super.data(id, data);
-    }
-    listenRefused(protocol) {
-        super.listenRefused(protocol);
+    connectionClosed(conID, msg) {
+        super.connectionClosed(conID, msg);
+        var info = this.connections.infoByConID.get(conID);
+        if (info) {
+            this.connections.infoByConID.delete(conID);
+            this.connections.conIDsByPeerID.delete(info.peerID);
+        }
     }
     listenerClosed(protocol) {
-        this.delegate.listeningTo.delete(protocol);
         super.listenerClosed(protocol);
+        this.connections.listeningTo.delete(protocol);
     }
-    peerConnection(conid, peerid, prot) {
-        this.delegate.outgoingConnections.set(conid, prot);
-        super.peerConnection(conid, peerid, prot);
-    }
-    peerConnectionRefused(peerid, prot, msg) {
-        super.peerConnectionRefused(peerid, prot, msg);
-    }
-    error(msg) {
-        super.error(msg);
-    }
-    discoveryHostConnect(conid, peerid, prot) {
-        this.delegate.incomingConnections.set(conid, prot);
-        super.discoveryHostConnect(conid, peerid, prot);
-    }
-    discoveryPeerConnect(conid, peerid, prot) {
-        this.delegate.outgoingConnections.set(conid, prot);
-        this.delegate.awaitingCallbacks.delete(prot);
-        super.discoveryPeerConnect(conid, peerid, prot);
+    peerConnection(conID, peerID, prot) {
+        var con = new ConnectionInfo(conID, peerID, prot, false);
+        var ids = this.connections.conIDsByPeerID.get(peerID);
+
+        this.connections.infoByConID.set(conID, con);
+        if (!ids) {
+            ids = new Set();
+            this.connections.conIDsByPeerID.set(peerID, ids);
+        }
+        ids.add(conID);
+        super.peerConnection(conID, peerID, prot);
     }
     listening(protocol) {
-        this.delegate.listeningTo.add(protocol);
+        this.connections.listeningTo.add(protocol);
         super.listening(protocol);
     }
+/*
+    discoveryHostConnect(conID, peerID, prot) {
+        this.connections.incomingConnections.set(conID, new ConnectionInfo(conID, peerID, prot, true));
+        super.discoveryHostConnect(conID, peerID, prot);
+    }
+    discoveryPeerConnect(conID, peerID, prot) {
+        this.connections.outgoingConnections.set(conID, prot);
+        this.connections.awaitingCallbacks.delete(prot);
+        super.discoveryPeerConnect(conID, peerID, prot);
+    }
+*/
+/*
     discoveryAwaitingCallback(protocol) {
-        this.delegate.awaitingCallbacks.add(protocol);
+        this.connections.awaitingCallbacks.add(protocol);
         super.discoveryAwaitingCallback(protocol);
     }
+*/
+}
+
+/* Commands the relay can receive
+ */
+const relayServiceCommands = Object.freeze({
+    requestHosting: true,
+    requestCallback: true,
+    requestRelaying: true,
+    relay: true,
+    receiveRelayConnection: true,
+    receiveRelay: true,
+    receiveRelayCallbackRequest: true,
+});
+
+const relayErrors = Object.freeze({
+    hostingNotAllowed: "relayHostingNotAllowed",
+    unknownCommand: "unknownRelayCommand",
+    badCommand: "badRelayCommand",
+    relayingError: "relayingError",
+    badProtocol: "badRelayProtocol",
+});
+
+/* Handler that runs a relay service
+ *  This is probably more of an "application-layer" class
+ *
+ *  Listens on a framed protocol for relay commands, which are JSON commands
+ *  COMMANDS:
+ *   name: 'requestHosting', protocol: PROTOCOL -- a host is requesting relaying
+ *   name: 'requestCallback', peer: peerID, protocol: PROTOCOL, callbackProtocol: PROTOCOL, token: TOKEN -- a public peer is requesting a callback from a relayed host
+ *   name: 'requestRelaying', peer: peerID, protocol: PROTOCOL -- a private peer is requesting relaying to a host
+ *   name: 'closeRelayConnection', peer: PEERID, protocol: PROTOCOL -- a host is closing a connection
+ *   name: 'relay', peer: PEERID, protocol: PROTOCOL, command: COMMAND -- send COMMAND to peer with id PEERID
+ *   ---- in the future, we can have an authorize to restrict peer connections
+ *
+ *  COMMANDS TO HOSTS: -- commands to a host, after it has issued an approved host command
+ *   name: 'receiveRelayConnection', peer: PEERID, protocol: PROTOCOL
+ *   name: 'receiveRelay', peer: PEERID, protocol: PROTOCOL, command: COMMAND
+ *   name: 'receiveRelayCallbackRequest', peer: PEERID, protocol: PROTOCOL, callbackProtocol: PROTOCOL, token: TOKEN
+ */
+class RelayService extends CommandHandler {
+    // if connections is null, it uses itself for connection information
+    constructor(connections, delegate, relayProtocol, callbackProtocol, delegateData) {
+        super(delegate, connections, relayServiceCommands, delegateData, [relayProtocol, callbackProtocol]);
+        this.relayProtocol = relayProtocol;
+        this.callbackProtocol = callbackProtocol;
+        this.relayConnections = new Map(); // map of conID -> relay connection info
+        this.relayPeers = new Map();       // map of peerID -> relay connection info
+        this.allowedPeers = null;          // if not null, a set of peers allowed to connect
+        this.allowedHosts = null;          // if not null, a set of [peerID, protocol] to allow hosting
+        this.delegateData = delegateData;
+    }
+    startRelay() {
+        listen(this.relayProtocol, true);
+        listen(this.callbackProtocol, true);
+    }
+    // P2P API
+    connectionClosed(conID, msg) {
+        var info = getConnectionInfo(this.connections, conID);
+
+        if (this.isRelaying(info)) {
+            for (var [peer, protocol] of info.connectionsToHosts) {
+                var relayingPeer = this.relayPeers.get(peer);
+
+                relayingPeer.connectionsFromPeers.delete([info.peerID, protocol]);
+            }
+            for (var [peer, protocol] of info.connectionsFromPeers) {
+                var relayingPeer = this.relayPeers.get(peer);
+
+                relayingPeer.connectionsToHosts.delete([info.peerID, protocol]);
+            }
+        }
+    }
+    // RELAY CMD API
+    requestHosting(info, {protocol}) {
+        this.getRelayInfo(info);
+        if (this.allowedPeers != null && !this.allowedPeers.has(info.peerID)) {
+            connectionError(info.conID, relayErrors.hostingNotAllowed, 'Not allowed to use relay', true);
+        } else if (this.allowedHosts == null || this.allowedHosts.has(info.peerID)) {
+            this.relayConnections.set(info.conID, info);
+            this.relayPeers.set(info.peerID, info);
+            info.hostedProtocols.add(protocol);
+            this.delegate.requestHosting && this.delegate.requestHosting(info, {protocol});
+        }
+    }
+    // RELAY CMD API
+    requestCallback(info, {peer, protocol, callbackProtocol, token}) {
+        var relayPeer = this.relayPeers.get(peer);
+
+        if (!relayPeer) {
+            connectionError(info.conID, relayErrors.notConnected, 'Relay not connected to requested peer: '+peer, true, {peer});
+        } else {
+            sendObject(relayPeer.conID, {name: 'receiveRelayCallbackRequest', peer: info.peerID, protocol, callbackProtocol, token});
+            this.delegate.requestCallback && this.delegate.requestCallback(info, {peer, protocol, callbackProtocol, token});
+            close(info.conID);
+        }
+    }
+    // RELAY CMD API
+    requestRelaying(info, {peer, protocol}) {
+        if (this.allowedPeers != null && !this.allowedPeers.has(info.peerID)) {
+            return connectionError(info.conID, relayErrors.hostingNotAllowed, 'Not allowed to use relay', true);
+        }
+        var relayPeer = this.relayPeers.get(peer);
+
+        if (!relayPeer) {
+            return connectionError(info.conID, relayErrors.notConnected, 'Relay not connected to requested peer: '+peer, true, {peer: peer});
+        }
+        getRelayInfo(info);
+        info.connectionsToHosts.add([peer, protocol]);
+        relayPeer.connectionsFromPeers.add([peer, protocol]);
+        sendObject(info.conID, {name: 'receiveRelayConnection', peer: info.peerID, protocol});
+        this.delegate.requestRelaying && this.delegate.requestRelaying(info, {peer, protocol});
+    }
+    // RELAY CMD API
+    closeRelayConnection(info, {peer, protocol}) {
+        var info = this.connections.infoByConID.get(conID);
+
+        if (!this.isRelaying(info)) {
+            connectionError(info.conID, relayErrors.notConnected, 'Not connected to relay', true);
+        } else if (!info.hostedProtocols.has(protocol)) {
+            connectionError(info.conID, relayErrors.badProtocol, 'Not hosting protocol: '+protocol, true);
+        } else {
+            var relayPeer = this.relayPeers.get(peer);
+
+            if (!relayPeer) return;
+            this.delegate.closeRelayConnection && this.delegate.closeRelayConnection(info, {peer, protocol});
+            info.connectionsFromPeers.delete([peer, protocol]);
+            relayPeer.connectionsToHosts.delete([info.peerId, protocol]);
+            if (relayPeer.hostedProtocols.size == 0 && relayPeer.connectionsToHosts.size == 0 && relayPeer.connectionsFromPeers.size == 0) {
+                close(relayPeer.conID);
+            }
+        }
+    }
+    // RELAY CMD API
+    relay(conID, {peer, protocol, command}) {
+        var info = getConnectionInfo(this.connections, conID);
+        var relayingPeer = this.relayPeers.get(peer);
+
+        if (!isRelaying(info)) {
+            return connectionError(info.conID, relayErrors.notConnected, 'Not connected to relay', true);
+        } else if (!info.connectionsFromPeers.has(peer) && !info.connectionsToHosts.has(peer)) {
+            return connectionError(info.conID, relayErrors.notConnected, 'Not relaying to peer over protocol: '+protocol, false);
+        }
+        sendObject(relayingPeer.conID, {name: 'receiveRelay', peer: info.peerID, protocol, command});
+        this.delegate.relay && this.delegate.relay(conID, {peer, protocol, command});
+    }
+    // RELAY CMD API
+    receiveRelayCallbackRequest(conID, cmd) {
+        this.delegate.receiveRelayCallbackRequest && this.delegate.receiveRelayCallbackRequest(conID, cmd);
+    }
+    // RELAY CMD API
+    receiveRelayConnection(conID, cmd) {
+        this.delegate.receiveRelayConnection && this.delegate.receiveRelayConnection(conID, cmd);
+    }
+    // RELAY CMD API
+    receiveRelay(conID, cmd) {
+        this.delegate.receiveRelay && this.delegate.receiveRelay(conID, cmd);
+    }
+    isRelaying(info) {
+        return info && info.hostedProtocols;
+    }
+    isRelayingToHost(conID, protocol) {
+        var info = this.connections.infoByConID.get(conID);
+
+        return info && info.hostedProtocols.has(protocol);
+    }
+    getRelayInfo(info) {
+        if (info && !info.hostedProtocols) {
+            info.hostedProtocols = new Set();      // set of protocols the peer is hosting
+            info.connectionsToHosts = new Set();   // set of [peerID, protocol] the peer is connected to
+            info.connectionsFromPeers = new Set(); // set of [peerID, protocol] relaying to the host
+        }
+        return info;
+    }
+    // Allow host peerID to request relaying for protocol
+    enableRelay(peerID, protocol) {
+        if (peerID && protocol) {
+            if (this.allowedHosts == null) {
+                this.allowedHosts = new Map();
+            }
+            var prots = this.allowedHosts.get(peerID);
+            if (!prots) {
+                prots = new Set();
+                this.allowedHosts.set(peerID, prots);
+            }
+            prots.add(protocol);
+        }
+    }
+    disableRelay(peerID, protocol) {
+        if (peerID && this.allowedHosts) {
+            var prots = this.allowedHosts.get(peerID);
+
+            if (prots) {
+                if (protocol) {
+                    prots.delete(protocol);
+                } else {
+                    this.allowedHosts.delete(peerID);
+                }
+            }
+        }
+    }
+    allowPeer(peerID) {
+        if (this.allowedPeers == null) {
+            this.allowedPeers = new Set();
+        }
+        if (peerID) {
+            this.allowedPeers.add(peerID);
+        }
+    }
+}
+
+function getConnectionInfo(connections, conID) {
+    return connections.infoByConID.get(conID);
 }
 
 function start(urlStr, handler) {
@@ -364,28 +718,29 @@ function start(urlStr, handler) {
             switch (data[0]) {
             case smsg.ident: {
                 var publicPeer = data[1]
-                peerId = getString(data.slice(2));
-                handler.ident(publicPeer, getString(data.slice(2)));
+                var peerID = getCountedString(dv, 2);
+                var addresses = JSON.parse(getString(data.slice(4 + peerID.length)));
+                handler.ident(publicPeer, peerID, addresses);
                 break;
             }
             case smsg.listenerConnection: {
-                var id = dv.getBigUint64(1);
-                var peerid = getCountedString(dv, 9);
-                var prot = getString(data.slice(9 + 2 + peerid.length));
+                var conID = dv.getBigUint64(1);
+                var peerID = getCountedString(dv, 9);
+                var prot = getString(data.slice(9 + 2 + peerID.length));
 
-                handler.listenerConnection(id, peerid, prot);
+                handler.listenerConnection(conID, peerID, prot);
                 break;
             }
             case smsg.connectionClosed: {
-                var id = dv.getBigUint64(1);
+                var conID = dv.getBigUint64(1);
                 var reason = getString(data.slice(9));
 
-                handler.connectionClosed(id, reason);
+                handler.connectionClosed(conID, reason);
                 break;
             }
             case smsg.data: {
-                var id = dv.getBigUint64(1);
-                handler.data(id, data.slice(9));
+                var conID = dv.getBigUint64(1);
+                handler.data(conID, data.slice(9));
                 break;
             }
             case smsg.listenRefused:
@@ -395,37 +750,37 @@ function start(urlStr, handler) {
                 handler.listenerClosed(getString(data.slice(1)));
                 break;
             case smsg.peerConnection:
-                var conid = dv.getBigUint64(1);
-                var peerid = getCountedString(dv, 9);
-                var prot = getString(data.slice(9 + 2 + peerid.length));
+                var conID = dv.getBigUint64(1);
+                var peerID = getCountedString(dv, 9);
+                var prot = getString(data.slice(9 + 2 + peerID.length));
 
-                handler.peerConnection(conid, peerid, prot)
+                handler.peerConnection(conID, peerID, prot)
                 break;
             case smsg.peerConnectionRefused: {
                 var prot = getCountedString(dv, 1);
-                var peeridStart = prot.length + 2 + 1;
-                var peerid = getCountedString(dv, peeridStart);
-                var msg = getString(data.slice(peeridStart + peerid.length + 2));
+                var peerIDStart = prot.length + 2 + 1;
+                var peerID = getCountedString(dv, peerIDStart);
+                var msg = getString(data.slice(peerIDStart + peerID.length + 2));
 
-                handler.peerConnectionRefused(peerid, prot, msg);
+                handler.peerConnectionRefused(peerID, prot, msg);
                 break;
             }
             case smsg.error:
                 handler.error(getString(data.slice(1)));
                 break;
             case smsg.discoveryHostConnect:
-                var conid = dv.getBigUint64(1)
-                var peerid = getCountedString(dv, 9)
-                var prot = getString(data.slice(9 + peerid.length + 2))
+                var conID = dv.getBigUint64(1)
+                var peerID = getCountedString(dv, 9)
+                var prot = getString(data.slice(9 + peerID.length + 2))
 
-                handler.discoveryHostConnect(conid, peerid, prot);
+                handler.discoveryHostConnect(conID, peerID, prot);
                 break;
             case smsg.discoveryPeerConnect:
-                var conid = dv.getBigUint64(1)
-                var peerid = getCountedString(dv, 9)
-                var prot = getString(data.slice(9 + peerid.length + 2))
+                var conID = dv.getBigUint64(1)
+                var peerID = getCountedString(dv, 9)
+                var prot = getString(data.slice(9 + peerID.length + 2))
 
-                handler.discoveryPeerConnect(conid, peerid, prot);
+                handler.discoveryPeerConnect(conID, peerID, prot);
                 break;
             case smsg.listening:
                 handler.listening(getString(data.slice(1)));
@@ -454,19 +809,44 @@ function checkProt(str) {
     }
 }
 
-function checkPeerId(str) {
-    if (!str.match(peerIdPat)) {
+function checkPeerID(str) {
+    if (!str.match(peerIDPat)) {
         return 'Bad peer ID format, peer ids must not contain slashes this id is '+str;
     }
 }
     
+// base 85 encoding courtesy of Dave Brown, Stackoverflow
+// https://stackoverflow.com/a/31741111/1026782
+function encode_ascii85(a) {
+  var b, c, d, e, f, g, h, i, j, k;
+  for (!/[^\x00-\xFF]/.test(a), b = "\x00\x00\x00\x00".slice(a.length % 4 || 4), a += b, 
+  c = [], d = 0, e = a.length; e > d; d += 4) f = (a.charCodeAt(d) << 24) + (a.charCodeAt(d + 1) << 16) + (a.charCodeAt(d + 2) << 8) + a.charCodeAt(d + 3), 
+  0 !== f ? (k = f % 85, f = (f - k) / 85, j = f % 85, f = (f - j) / 85, i = f % 85, 
+  f = (f - i) / 85, h = f % 85, f = (f - h) / 85, g = f % 85, c.push(g + 33, h + 33, i + 33, j + 33, k + 33)) :c.push(122);
+  return function(a, b) {
+    for (var c = b; c > 0; c--) a.pop();
+  }(c, b.length), String.fromCharCode.apply(String, c);
+}
+
+function decode_ascii85(a) {
+  var c, d, e, f, g, h = String, l = "length", w = 255, x = "charCodeAt", y = "slice", z = "replace";
+  a = "<~"+a+"~>";
+  for ("<~" === a[y](0, 2) && "~>" === a[y](-2), a = a[y](2, -2)[z](/\s/g, "")[z]("z", "!!!!!"), 
+  c = "uuuuu"[y](a[l] % 5 || 5), a += c, e = [], f = 0, g = a[l]; g > f; f += 5) d = 52200625 * (a[x](f) - 33) + 614125 * (a[x](f + 1) - 33) + 7225 * (a[x](f + 2) - 33) + 85 * (a[x](f + 3) - 33) + (a[x](f + 4) - 33), 
+  e.push(w & d >> 24, w & d >> 16, w & d >> 8, w & d);
+  return function(a, b) {
+    for (var c = b; c > 0; c--) a.pop();
+  }(e, c[l]), h.fromCharCode.apply(h, e);
+}
+
 export default {
     start,
     BlankHandler,
+    CommandHandler,
     TrackingHandler,
     LoggingHandler,
     checkProt,
-    checkPeerId,
+    checkPeerID,
     sendString,
     sendObject,
     sendData,
@@ -477,4 +857,9 @@ export default {
     discoveryConnect,
     getString,
     close,
+    connectionError,
+    RelayService,
+    getConnectionInfo,
+    encode_ascii85,
+    decode_ascii85,
 }

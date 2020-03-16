@@ -38,19 +38,45 @@
                     <div id='awaitingPeer'>WAITING FOR PEER STATUS</div>
                 </div>
                 <div id='chatsBody'>
-                    <div id='hostDiv' class='field'>
-                        <button id='host'>Host</button>
-                        <input id='listenerStatus' type='text' readonly='true'>
-                    </div>
                     <div id='connectDiv'>
-                        <button id='connect'>Connect</button>
-                        To peer: <input id='toHostID' type='text'>
-                        <span id='connectStatus'></span>
+                        <hr>
+                        <div class='field'>
+                            <button id='connect'>Connect</button>
+                            &nbsp;
+                            <span id='connectStatus'></span>
+                            <input id='toHostID' type='text'>
+                        </div>
                     </div>
+                    <div id='hostDiv'>
+                        <hr>
+                        <div class='field'>
+                            <button id='host'>Host</button>
+                            &nbsp;
+                            <span class='private-only'>&nbsp;Relay connect string:&nbsp;</span>
+                            <input id='hostingRelay' type='text' class='private-only' placeholder='You must use a relay because your connection is private'>
+                        </div>
+                        <div class='field'>
+                            Connect string:&nbsp;
+                            <input id='connectString' type='text' readonly='true'>
+                        </div>
+                    </div>
+                    <div id='relayPanel'>
+                        <hr>
+                        <div id='relayHosting'>
+                            <div class='field'>
+                                <button id='relayForHost'>Relay for</button> <span>Host Peer: </span> <input id='relayRequestHost' type='text'>
+                            </div>
+                            <div class='field'>
+                                Relay connect string:&nbsp;
+                                <input id='relayConnectString' type='text' readonly='true'>
+                            </div>
+                        </div>
+                    </div>
+                    <hr>
                     <button id='showChats'>Show Chats</button>
                     <div id='connectionPanel' class='panel'>
-                        <div class='field'><button id='relayForHost'>Relay for</button> <span>Host Peer: </span> <input id='relayRequestHost' type='text'></div>
-                        <div class='field'><button id='useRelay'>Connect to</button> <span>Relay Peer: </span><input id='relayPeer' type='text'></div>
+                        Relaying Peers
+                        <div class='panel' id='relayingPeers'></div>
                     </div>
                     <div id='chatPanel'>
                         <div id='userPanel'>

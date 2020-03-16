@@ -39,6 +39,9 @@ import (
 	"sync/atomic"
 	"time"
 	"strings"
+	"encoding/ascii85"
+	"encoding/json"
+	"bytes"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/network"
@@ -125,6 +128,7 @@ type listener struct {
 var logger = goLog.Logger("p2pmud")
 var peerKey string
 var listenAddresses addrList
+var fakeNatStatus string
 var bootstrapPeers addrList
 var bootstrapPeerStrings = []string{
 	"/dnsaddr/bootstrap.libp2p.io/ipfs/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
@@ -200,7 +204,7 @@ func (r *libp2pRelay) CleanupClosed(con *connection) {
 
 // LISTEN API METHOD
 func (r *libp2pRelay) Listen(c *client, prot string, frames bool) {
-	r.listen(smsgListening, smsgPeerConnection, r.libp2pClient(c), prot, frames, nil)
+	r.listen(smsgListening, smsgNewConnection, r.libp2pClient(c), prot, frames, nil)
 }
 
 func (r *libp2pRelay) listen(announceMsg messageType, msgType messageType, c *libp2pClient, prot string, frames bool, connect func(*libp2pConnection)) *listener {
@@ -299,18 +303,106 @@ func (r *libp2pRelay) Data(c *client, id uint64, data []byte) {
 
 // CONNECT API METHOD
 func (r *libp2pRelay) Connect(c *client, prot string, peerid string, frames bool, relay bool) {
+	type addrs struct {
+		PeerID string
+		Addrs []string // the addrs of the peer
+	}
+	//var encodedAddrs addrs
+	encodedAddrs := new(addrs)
+	var addrInfo peer.AddrInfo
 	relayMsg := "out"
+
 	if relay {
 		relayMsg = ""
 	}
-	fmt.Printf("Attempting to connect with protocol %v to peer %v with%s relay\n", prot, peerid, relayMsg)
+	if strings.HasPrefix(peerid, "/addrs/") {
+		enc := strings.TrimPrefix(peerid, "/addrs/")
+		dst := make([]byte, len(enc))
+		ndst, _, err := ascii85.Decode(dst, []byte(enc), true)
+		fmt.Println("Decoded", ndst, "bytes, len(dst) =", len(dst))
+		if err != nil {
+			c.connectionRefused(fmt.Errorf("Could not decode addrs: %s\n", peerid), peerid, prot)
+			return
+		}
+		fmt.Println("Decoding", string(dst[:ndst]))
+		//err = json.Unmarshal(dst[:ndst], &encodedAddrs)
+		err = json.Unmarshal(dst[:ndst], encodedAddrs)
+		if err != nil {
+			c.connectionRefused(fmt.Errorf("Could not decode addrs: %s\n", string(dst[:ndst])), peerid, prot)
+			return
+		}
+		peerid = encodedAddrs.PeerID
+		fmt.Println("Peer ID:", peerid)
+		fmt.Printf("Addrs: %#v\n", encodedAddrs)
+		addrInfo.Addrs = make([]multiaddr.Multiaddr, len(encodedAddrs.Addrs))
+		for i, addr := range encodedAddrs.Addrs {
+			ma, err := multiaddr.NewMultiaddr(addr)
+			if err != nil {
+				c.connectionRefused(fmt.Errorf("Could not decode peer addr: %s\n", addr), peerid, prot)
+				return
+			}
+			addrInfo.Addrs[i] = ma
+		}
+	}
 	pid, err := peer.Decode(peerid)
 	if err != nil {
-		c.connectionRefused(err, peerid, prot)
+		c.connectionRefused(fmt.Errorf("Error parsing peer id %s: %s", peerid, err), peerid, prot)
+		return
 	}
-	r.retryLoop(c, prot, peerid, pid, frames, relay, 0, func(con *libp2pConnection){}, func(err error) {
-		c.connectionRefused(err, peerid, prot)
-	})
+	addrInfo.ID = pid
+/*
+	fmt.Printf("Finding address for peer %s\n", pid.Pretty())
+	addr, err := peerFinder.FindPeer(context.Background(), pid)
+	if err != nil {
+		c.connectionRefused(fmt.Errorf("Error finding peer %s: %s\n", pid.Pretty(), err.Error()), peerid, prot)
+		return
+	} else if len(addr.Addrs) == 0 {
+		c.connectionRefused(fmt.Errorf("Could not find peer %s\n", pid.Pretty()), peerid, prot)
+		return
+	}
+	fmt.Printf("Attempting to connect peer %s\n", pid.Pretty())
+	err = r.host.Connect(context.Background(), addr)
+	if err != nil {
+		c.connectionRefused(fmt.Errorf("Could not connect to peer %s: %s\n", pid.Pretty(), err.Error()), pid.Pretty(), prot)
+		return
+	}
+*/
+	if encodedAddrs.PeerID == "" {
+		fmt.Printf("Attempting to connect peer %s\n", pid.Pretty())
+		maddr, err := multiaddr.NewMultiaddr("/p2p/"+peerid)
+		if err != nil {
+			c.connectionRefused(fmt.Errorf("Could not parse multiaddr %s\n", "/p2p/"+peerid), pid.Pretty(), prot)
+			return
+		}
+		addrInfo.ID = pid
+		addrInfo.Addrs = []multiaddr.Multiaddr{maddr}
+	}
+	err = r.host.Connect(context.Background(), addrInfo)
+	if err != nil {
+		c.connectionRefused(fmt.Errorf("Could not connect to peer %s: %s\n", pid.Pretty(), err.Error()), pid.Pretty(), prot)
+		return
+	}
+	fmt.Printf("Attempting to connect with protocol %v to peer %v with%s relay\n", prot, peerid, relayMsg)
+	if !relay {
+
+		stream, err := r.host.NewStream(context.Background(), pid, protocol.ID(prot))
+		if err != nil {
+			fmt.Println("COULDN'T OPEN STREAM,", err)
+			c.connectionRefused(err, peerid, prot)
+			return
+		}
+		fmt.Println("Connected")
+		lc := r.libp2pClient(c)
+		c.newConnection(smsgPeerConnection, prot, stream.Conn().RemotePeer().Pretty(), func(conID uint64) *connection {
+			con := lc.createConnection(conID, prot, stream, frames)
+			lc.forwarders[conID] = con
+			return &con.connection
+		})
+	} else {
+		r.retryLoop(c, prot, peerid, pid, frames, relay, 0, func(con *libp2pConnection){}, func(err error) {
+			c.connectionRefused(err, peerid, prot)
+		})
+	}
 }
 
 func (r *libp2pRelay) retryLoop(c *client, prot string, peerid string, pid peer.ID, frames bool, relay bool, count int, successFunc func(con *libp2pConnection), errFunc func(err error)) {
@@ -577,6 +669,34 @@ func (r *libp2pRelay) printAddresses() {
 	}
 }
 
+func (r *libp2pRelay) AddressesJson() string {
+	buf := bytes.NewBuffer(make([]byte, 0, 16))
+	fmt.Println("Getting addresses...")
+	buf.WriteByte(byte('['))
+	first := true
+	for _, addr := range r.host.Addrs() {
+		if first {
+			first = false
+		} else {
+			buf.WriteByte(byte(','))
+		}
+		buf.WriteByte(byte('"'))
+		buf.Write([]byte(addr.String()))
+		buf.WriteByte(byte('"'))
+		fmt.Println("Address: " + addr.String())
+	}
+	buf.WriteByte(byte(']'))
+	return string(buf.Bytes())
+}
+
+func (r *libp2pRelay) setNATStatus(status autonat.NATStatus) {
+	r.natStatus = status
+	for _, f := range r.natActions {
+		f()
+	}
+	r.natActions = []func(){}
+}
+
 func createListener() *listener {
 	lis := new(listener)
 	lis.connections = make(map[uint64]*libp2pConnection)
@@ -720,49 +840,51 @@ func initp2p(relay *libp2pRelay) {
 	relay.peerID = myHost.ID().Pretty()
 	relay.host = myHost
 
-	/// MONITOR NAT STATUS
-	fmt.Println("Creating autonat")
-	an := autonat.NewAutoNAT(ctx, myHost, nil)
-	relay.natStatus = autonat.NATStatusUnknown
-	go func() {
-		peeped := false
-		for {
-			status := an.Status()
-			svcSync(relay, func() interface{} {
-				if status != relay.natStatus || !peeped {
-					switch status {
-					case autonat.NATStatusUnknown:
-						fmt.Println("@@@ NAT status UNKNOWN")
-						addr, err := an.PublicAddr()
-						if err == nil {
-							fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
-							relay.printAddresses()
+	if fakeNatStatus == "public" {
+		relay.setNATStatus(autonat.NATStatusPublic)
+	} else if fakeNatStatus == "private" {
+		relay.setNATStatus(autonat.NATStatusPrivate)
+	} else {
+		/// MONITOR NAT STATUS
+		fmt.Println("Creating autonat")
+		//an := autonat.NewAutoNAT(ctx, myHost, nil)
+		an := autonat.NewAutoNAT(context.Background(), myHost, nil)
+		relay.natStatus = autonat.NATStatusUnknown
+		go func() {
+			peeped := false
+			for {
+				status := an.Status()
+				svcSync(relay, func() interface{} {
+					if status != relay.natStatus || !peeped {
+						switch status {
+						case autonat.NATStatusUnknown:
+							fmt.Println("@@@ NAT status UNKNOWN")
+							addr, err := an.PublicAddr()
+							if err == nil {
+								fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
+								relay.printAddresses()
+							}
+						case autonat.NATStatusPublic:
+							fmt.Println("@@@ NAT status PUBLIC")
+							addr, err := an.PublicAddr()
+							if err == nil {
+								fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
+								relay.printAddresses()
+							}
+						case autonat.NATStatusPrivate:
+							fmt.Println("@@@ NAT status PRIVATE")
 						}
-					case autonat.NATStatusPublic:
-						fmt.Println("@@@ NAT status PUBLIC")
-						addr, err := an.PublicAddr()
-						if err == nil {
-							fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
-							relay.printAddresses()
+						if status != autonat.NATStatusUnknown {
+							relay.setNATStatus(status)
 						}
-					case autonat.NATStatusPrivate:
-						fmt.Println("@@@ NAT status PRIVATE")
 					}
-					if status != autonat.NATStatusUnknown {
-						relay.natStatus = status
-						for _, f := range relay.natActions {
-							f()
-						}
-						relay.natActions = []func(){}
-					}
-				}
-				return nil
-			})
-			peeped = true
-			time.Sleep(250 * time.Millisecond)
-		}
-	}()
-
+					return nil
+				})
+				peeped = true
+				time.Sleep(250 * time.Millisecond)
+			}
+		}()
+	}
 	key := myHost.Peerstore().PrivKey(myHost.ID())
 	keyBytes, err := crypto.MarshalPrivateKey(key)
 	checkErr(err)
@@ -894,6 +1016,8 @@ func main() {
 	noBootstrap := false
 	bootstrapArg := addrList([]multiaddr.Multiaddr{})
 	fileList := fileList([]string{})
+	fakeNATPrivate := false
+	fakeNATPublic := false
 	flag.BoolVar(&noBootstrap, "nopeers", false, "clear the bootstrap peer list")
 	flag.StringVar(&peerKey, "key", "", "specify peer key")
 	flag.Var(&fileList, "files", "add the contents of a directory to serve from /")
@@ -902,11 +1026,18 @@ func main() {
 	flag.Var(&bootstrapArg, "peer", "Adds a peer multiaddress to the bootstrap list")
 	flag.Var(&listenAddresses, "listen", "Adds a multiaddress to the listen list")
 	flag.StringVar(&browse, "browse", "", "Browse a URL")
+	flag.BoolVar(&fakeNATPrivate, "fakenatprivate", false, "pretend nat is private")
+	flag.BoolVar(&fakeNATPublic, "fakenatpublic", false, "pretend nat is publc")
 	flag.Parse()
 	if len(bootstrapArg) > 0 {
 		bootstrapPeers = bootstrapArg
 	} else {
 		bootstrapPeers, _ = StringsToAddrs(bootstrapPeerStrings)
+	}
+	if fakeNATPrivate {
+		fakeNatStatus = "private"
+	} else if fakeNATPublic {
+		fakeNatStatus = "public"
 	}
 	initp2p(relay)
 	relay.printAddresses()

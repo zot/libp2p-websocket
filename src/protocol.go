@@ -41,7 +41,7 @@ messages, with the first byte of each message identifying the command.
  
 ```
   Listen:      [0][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
-  Stop:        [1][PROTOCOL: rest]            -- stop listening on PORT
+  Stop:        [1][PROTOCOL: rest]            -- stop listening to PROTOCOL
   Close:       [2][ID: 8]                     -- close a stream
   Data:        [3][ID: 8][data: rest]         -- write data to stream
   Connect:     [4][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
@@ -208,6 +208,7 @@ type protocolHandler interface {
 	Data(c *client, conID uint64, data []byte)
 	Connect(c *client, protocol string, peerID string, frames bool, relay bool)
 	CleanupClosed(c *connection)
+	AddressesJson() string
 }
 
 /*
@@ -791,7 +792,7 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 				}()
 				// start the client, send ident message when ready
 				r.StartClient(client, func(public bool) {
-					client.writePackedMessage(smsgIdent, public, r.peerID)
+					client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson())
 					runSvc(client)
 					client.readWebsocket(r)
 				})

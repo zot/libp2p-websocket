@@ -52,13 +52,13 @@ import (
 	"github.com/libp2p/go-libp2p-discovery"
 	//basicHost "github.com/libp2p/go-libp2p/p2p/host/basic"
 	//circuit "github.com/libp2p/go-libp2p-circuit"
-	rly "github.com/libp2p/go-libp2p/p2p/host/relay"
+	//rly "github.com/libp2p/go-libp2p/p2p/host/relay"
 	//routing "github.com/libp2p/go-libp2p-routing"
 	autonat "github.com/libp2p/go-libp2p-autonat"
 	//pubsub "github.com/libp2p/go-libp2p-pubsub"
 	//pb "github.com/libp2p/go-libp2p-pubsub/pb"
 
-	dht "github.com/libp2p/go-libp2p-kad-dht"
+	//dht "github.com/libp2p/go-libp2p-kad-dht"
 	multiaddr "github.com/multiformats/go-multiaddr"
 	logging "github.com/whyrusleeping/go-logging"
 
@@ -398,13 +398,16 @@ func (r *libp2pRelay) Connect(c *client, prot string, peerid string, frames bool
 			lc.forwarders[conID] = con
 			return &con.connection
 		})
+/*
 	} else {
 		r.retryLoop(c, prot, peerid, pid, frames, relay, 0, func(con *libp2pConnection){}, func(err error) {
 			c.connectionRefused(err, peerid, prot)
 		})
+*/
 	}
 }
 
+/*
 func (r *libp2pRelay) retryLoop(c *client, prot string, peerid string, pid peer.ID, frames bool, relay bool, count int, successFunc func(con *libp2pConnection), errFunc func(err error)) {
 	if count > 4 {
 		errFunc(retryError("Failed after 5 attempts to find address for "+peerid))
@@ -427,6 +430,7 @@ func (r *libp2pRelay) retryLoop(c *client, prot string, peerid string, pid peer.
 		}
 	}
 }
+*/
 
 func direct(protocol string, frames bool) string {
 	prot := discoveryDirectPrefix
@@ -557,6 +561,7 @@ func (r *libp2pRelay) monitorCallbackRequests(c *libp2pClient, frames bool, prot
 }
 
 func (r *libp2pRelay) DiscoveryConnect(c *client, frames bool, prot string, peerid string) {
+/*
 	// TODO CREATE CANCELLATION MESSAGE SO USER CAN CANCEL A DISCOVERY, THEN REMOVE COUNT
 	logLine("DiscoveryConnect")
 	pid, err := peer.Decode(peerid)
@@ -608,8 +613,10 @@ func (r *libp2pRelay) DiscoveryConnect(c *client, frames bool, prot string, peer
 			}
 		}()
 	}
+*/
 }
 
+/*
 func (r *libp2pRelay) tryConnect(ctx context.Context, c *libp2pClient, peerID peer.ID, prot string, frames bool, relay bool, count int) (*libp2pConnection, error) {
 	if relay {
 		//can, err := circuit.CanHop(ctx, r.host, peerID)
@@ -660,6 +667,7 @@ func (r *libp2pRelay) tryConnect(ctx context.Context, c *libp2pClient, peerID pe
 	})
 	return con, nil
 }
+*/
 
 func (r *libp2pRelay) printAddresses() {
 	fmt.Println("Addresses:")
@@ -897,15 +905,15 @@ func initp2p(relay *libp2pRelay) {
 //	// client because we want each peer to maintain its own local copy of the
 //	// DHT, so that the bootstrapping node of the DHT can go down without
 //	// inhibiting future peer discovery.
-	kademliaDHT, err := dht.New(ctx, myHost)
-//	kademliaDHT := routingDht.Load().(*dht.IpfsDHT)
-	checkErr(err)
+//	kademliaDHT, err := dht.New(ctx, myHost)
+////	kademliaDHT := routingDht.Load().(*dht.IpfsDHT)
+//	checkErr(err)
 //
-	peerFinder = kademliaDHT
+//	peerFinder = kademliaDHT
 	// Bootstrap the DHT. In the default configuration, this spawns a Background
 	// thread that will refresh the peer table every five minutes.
-	logger.Debug("Bootstrapping the DHT")
-	checkErr(kademliaDHT.Bootstrap(ctx))
+//	logger.Debug("Bootstrapping the DHT")
+//	checkErr(kademliaDHT.Bootstrap(ctx))
 
 	// Let's connect to the bootstrap nodes first. They will tell us about the
 	// other nodes in the network.
@@ -933,7 +941,7 @@ func initp2p(relay *libp2pRelay) {
 	// This is like telling your friends to meet you at the Eiffel Tower.
 	logger.Info("Announcing ourselves...")
 	//relay.discovery = discovery.NewRoutingDiscovery(kademliaDHT)
-	relay.discovery = discovery.NewRoutingDiscovery(kademliaDHT)
+//	relay.discovery = discovery.NewRoutingDiscovery(kademliaDHT)
 	//err := myDHT.PutValue(context.Background(), "p2pmud", []byte(relay.host.ID().Pretty()))
 	//checkErr(err)
 	//mudChan := myDHT.Search(context.Background(), "p2pmud")
@@ -946,6 +954,7 @@ func initp2p(relay *libp2pRelay) {
 	//peerChan, err := relay.discovery.FindPeers(ctx, config.RendezvousString)
 	//_, err = relay.discovery.FindPeers(ctx, rendezvousString)
 	//checkErr(err)
+/*
 	peerChan, err := relay.discovery.FindPeers(ctx, rendezvousString) // request just to get in touch with peers
 	if err != nil {
 		panic(err)
@@ -960,6 +969,7 @@ func initp2p(relay *libp2pRelay) {
 		}
 		fmt.Println("FINISHED SEARCHING FOR PEERS")
 	}()
+*/
 }
 
 func (fl *fileList) String() string {

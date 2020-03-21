@@ -32,6 +32,26 @@
 
 import libp2p from "./protocol.js"
 
+var {
+    natStatus,
+    RelayClient,
+    RelayHost,
+    RelayPeer,
+    RelayService,
+    CommandHandler,
+    TrackingHandler,
+    LoggingHandler,
+    encode_ascii85,
+    decode_ascii85,
+    getConnectionInfo,
+    close,
+    sendObject,
+    stop,
+    listen,
+    connect,
+    getInfoForPeerAndProtocol,
+} = libp2p;
+
 /// simplementation of jQuery
 function $(sel) {
     return typeof sel == 'string' ? document.querySelector(sel) : sel;
@@ -108,7 +128,7 @@ const chatState = Object.freeze({
 });
 
 // TODO split this into server and client command handlers
-class ChatHandler extends libp2p.CommandHandler {
+class ChatHandler extends CommandHandler {
     constructor(connections) {
         super(null, connections, chatCommands, null, []);
         this.connections = connections || this;
@@ -122,20 +142,20 @@ class ChatHandler extends libp2p.CommandHandler {
         this.protocols.add(prot);
     }
     // P2P API
-    ident(publicPeer, peerID, addresses) {
+    ident(status, peerID, addresses) {
         this.retrieveInfo();
-        $('#natStatus').textContent = this.connections.natStatus;
+        $('#natStatus').textContent = status;
         $('#peerID').textContent = peerID;
-        console.log('IDENT: ', peerID, ' ', this.connections.natStatus);
+        console.log('IDENT: ', peerID, ' ', status);
         document.body.classList.add('hasNat');
-        document.body.classList.add(publicPeer ? 'publicNAT' : 'privateNAT');
+        document.body.classList.add(status == natStatus.private ? 'privateNAT' : 'publicNAT');
         this.peerAddrs = addresses;
         this.reset();
         if (this.userName) {
             this.showGui();
         }
         this.storeInfo();
-        super.ident(publicPeer, peerID, addresses);
+        super.ident(status, peerID, addresses);
     }
     // P2P API
     listening(protocol) {
@@ -147,7 +167,7 @@ class ChatHandler extends libp2p.CommandHandler {
                 addrs: this.peerAddrs
             };
 
-            $('#connectString').value = libp2p.encode_ascii85(JSON.stringify(this.sessionID));
+            $('#connectString').value = encodeObject(this.sessionID);
             this.connection.listening = true;
             delete this.connection.disconnected;
             this.changeState(chatState.hostingDirectly);
@@ -161,8 +181,8 @@ class ChatHandler extends libp2p.CommandHandler {
             var users = [];
 
             console.log("Got connection "+conID+" for protocol "+prot+" from peer "+peerID);
-            this.hosting.set(conID, {connectionId: conID, peer: peerID, protocol: prot});
-            this.connection = {connected: true, hosted: true};
+            this.hosting.set(conID, {conID: conID, peerID, protocol: prot});
+            //this.connection = {connected: true, hosted: true};
         } else if (prot == callbackProtocol) { // got a callback, verify token later
             this.awaitingToken = true;
         }
@@ -172,7 +192,7 @@ class ChatHandler extends libp2p.CommandHandler {
     peerConnection(conID, peerID, protocol) {
         super.peerConnection(conID, peerID, protocol);
         if (this.callbacks && this.callbacks.has(peerID)) { // patch connection to look like it's incoming
-            var con = libp2p.getConnectionInfo(conID);
+            var con = getConnectionInfo(conID);
             con.protocol = this.protocol;
             return;
         }
@@ -181,7 +201,7 @@ class ChatHandler extends libp2p.CommandHandler {
         case chatState.abortingRelayConnection:
             this.changeState(chatState.disconnected);
             this.connection = {disconnected: true};
-            libp2p.close(conID);
+            close(conID);
             break;
         case chatState.connectingToHost: // connected directly to host
             if (peerID != this.chatHost) {
@@ -195,7 +215,7 @@ class ChatHandler extends libp2p.CommandHandler {
             if (peerID != this.requestedRelayPeer) {
                 alert('Connected to unexpected host: ' + peerID + ', expecting relay peer: ' + this.requestedRelayPeer);
             } else {
-                libp2p.sendObject(conID, {
+                sendObject(conID, {
                     name: 'requestHosting',
                     protocol: this.protocol,
                 });
@@ -203,13 +223,21 @@ class ChatHandler extends libp2p.CommandHandler {
                     peerID: this.connections.peerID,
                     relayID: this.requestedRelayPeer,
                     protocol: this.protocol,
-                    addrs: this.peerAddrs
+                    addrs: this.relayInfo.addrs,
                 };
 
+                this.relayConID = conID;
+                //this.relayService = new RelayHost(this, {
+                this.delegate = new RelayHost(this.connections, this, {
+                    //receiveRelay: this.receiveRelay.bind(this),
+                    receiveRelayConnectionFromPeer: this.receiveRelayConnectionFromPeer.bind(this),
+                    //receiveRelayCallbackRequest: this.receiveRelayCallbackRequest.bind(this),
+                    relayConnectionClosed: this.relayConnectionClosed.bind(this),
+                }, relayProtocol);
                 this.commandConnections.add(conID);
                 //this.connections.infoByConID.get(conID).hosted = true;
                 this.connection.hosted = true;
-                this.hosting.set(conID, {connectionId: conID, peer: peerID, protocol: protocol});
+                this.hosting.set(conID, {conID: conID, peerID, protocol});
                 $('#connectString').value = encodeObject(this.sessionID);
                 this.changeState(chatState.connectedToRelayForHosting);
             }
@@ -218,11 +246,18 @@ class ChatHandler extends libp2p.CommandHandler {
             if (peerID != this.requestedRelayPeer) {
                 alert('Connected to unexpected host: ' + peerID + ', expecting relay peer: ' + this.requestedRelayPeer);
             } else {
-                libp2p.sendObject(conID, {
+                this.delegate = new RelayPeer(this.connections, this, {
+                    //receiveRelay: this.receiveRelay.bind(this),
+                    //receiveRelayCallbackRequest: this.receiveRelayCallbackRequest.bind(this),
+                    receiveRelayConnectionToHost: this.receiveRelayConnectionToHost.bind(this),
+                    relayConnectionClosed: this.relayConnectionClosed.bind(this),
+                }, relayProtocol);
+                sendObject(conID, {
                     name: 'requestRelaying',
-                    peer: this.chatHost,
+                    peerID: this.chatHost,
                     protocol: this.chatProtocol,
                 });
+                this.relayConID = conID;
             }
             break;
         case chatState.hostingDirectly: // got new direct chat connection -- nothing more needed
@@ -239,15 +274,15 @@ class ChatHandler extends libp2p.CommandHandler {
     }
     // P2P API
     data(conID, data, obj) {
-        var con = libp2p.getConnectionInfo(this.connections, conID);
+        var con = getConnectionInfo(this.connections, conID);
 
         if (this.state == chatState.awaitingToken && con.protocol == callbackProtocol) {
             if (getString(data) == this.awaitingToken) {
                 this.awaitingToken = null;
                 this.changeState(chatState.connectedToHost);
-                libp2p.stop(callbackProtocol);
+                stop(callbackProtocol);
             } else {
-                libp2p.close(conID);
+                close(conID);
             }
         } else {
             super.data(conID, data, obj);
@@ -268,10 +303,10 @@ class ChatHandler extends libp2p.CommandHandler {
 
             if (con) {
                 this.hosting.delete(conID);
-                this.userMap.delete(con.peer);
+                this.userMap.delete(con.peerID);
                 for (var [id, con] of this.hosting) {
                     if (id != conID) {
-                        this.sendObject(id, {name: 'removeUser', peer: con.peer});
+                        this.sendObject(id, {name: 'removeUser', peerID: con.peerID});
                     }
                 }
                 this.showUsers()
@@ -280,7 +315,7 @@ class ChatHandler extends libp2p.CommandHandler {
                 this.relayHost = null;
             }
         } else {
-            if (this.connection.connectionId == conID) {
+            if (this.connection.conID == conID) {
                 this.reset();
             }
         }
@@ -295,54 +330,46 @@ class ChatHandler extends libp2p.CommandHandler {
     }
     // RELAY API
     requestHosting(info, {protocol}) { // only allow hosting request from the host peer
-        if (info.peerID != this.relayRequester) {
-            console.log('Got hosting request from unauthorized peer: '+info.peerID+', closing');
-            libp2p.close(info.conID);
-        } else {
-            this.connections.infoByConID.get(info.conID).isRelayHost = true;
-            this.relayHost = info.conID;
-            //this.showRelayInfo();
-            this.showHideChats(true);
-            this.commandConnections.add(info.conID);
-            this.connection.connected = true;
-            this.connection.connectionId = info.conID;
-            $('#relayForhost').textContent = 'Stop relaying';
-            this.sendObject(info.conID, {name: 'user', user: this.userName});
+        this.relayHost = info.conID;
+        //this.showRelayInfo();
+        this.showHideChats(true);
+        this.commandConnections.add(info.conID);
+        this.connection.connected = true;
+        this.connection.conID = info.conID;
+        $('#relayForhost').textContent = 'Stop relaying';
+        this.sendObject(info.conID, {name: 'user', user: this.userName});
+    }
+    // RELAY API
+    //requestCallback(info, {peerID, protocol, callbackProtocol, token}) {}
+    // RELAY API
+    //requestRelaying(info, {peerID, protocol}) {}
+    // RELAY API
+    //closeRelayConnection(info, {peerID, protocol}) {}
+    // RELAY API
+    //relay(conID, {peerID, protocol, command}) {} // no need to interfere here
+    // RELAY API
+    //receiveRelay(info, {peerID, protocol, command}) {}
+    // RELAY API
+    receiveRelayConnectionToHost(info, {peerID, protocol}) {
+        info = getInfoForPeerAndProtocol(this.connections, peerID, protocol);
+        if (info) {
+            this.changeState(chatState.connectingToHost);
+            this.peerConnection(info.conID, peerID, protocol);
         }
     }
     // RELAY API
-    //requestCallback(info, {peer, protocol, callbackProtocol, token}) {}
-    // RELAY API
-    //requestRelaying(info, {peer, protocol}) {}
-    // RELAY API
-    //closeRelayConnection(info, {peer, protocol}) {}
-    // RELAY API
-    //relay(conID, {peer, protocol, command}) {} // no need to interfere here
-    // RELAY API
-    receiveRelayConnection(info, {peer, protocol}) {
-        var id = this.relayNextId++;
-
-        this.relayConnectionIds.set(id, {peer, protocol});
-        this.relayConnectionPeers.set(peer, {id, protocol});
-    }
-    // RELAY API
-    receiveRelayCallbackRequest(info, {peer, protocol, callbackPeer, callbackProtocol, token}) {
-        if (this.protocol == this.protocol) {
-            this.callbacks.set(callbackPeer, token);
-            libp2p.connect(callbackPeer, callbackProtocol, true);
+    receiveRelayConnectionFromPeer(info, {peerID, protocol}) {
+        info = getInfoForPeerAndProtocol(this.connections, peerID, protocol);
+        if (info) {
+            this.listenerConnection(info.conID, info.peerID, protocol);
         }
     }
     // RELAY API
-    receiveRelay(info, {peer, protocol, command}) {
-        if (!this.handleCommand(info.conID, null, command)) {
-            if (this.state == chatState.connectedToRelayForHosting) {
-                libp2p.sendObject(this.relayConnection, {
-                    name: 'closeRelayConnection',
-                    peer,
-                    protocol,
-                });
-            }
-        }
+    //receiveRelayCallbackRequest(info, {peerID, protocol, command}) {}
+    // RELAY API
+    //receiveRelay(info, {peerID, protocol, command}) {}
+    // RELAY API
+    relayConnectionClosed(conID) {
     }
     // chat API message
     message(info, msg) {
@@ -362,15 +389,15 @@ class ChatHandler extends libp2p.CommandHandler {
                 var users = {};
 
                 connection.userName = cmd.user;
-                this.userMap.set(connection.peer, cmd.user);
+                this.userMap.set(connection.peerID, cmd.user);
                 this.showUsers();
-                for (var [peer, user] of this.userMap) {
-                    users[peer] = user;
+                for (var [peerID, user] of this.userMap) {
+                    users[peerID] = user;
                 }
                 this.sendObject(info.conID, {name: 'users', users});
                 for (var [conID, con] of this.hosting) {
                     if (conID != info.conID) {
-                        this.sendObject(conID, {name: 'addUser', user: cmd.user, peer: connection.peer});
+                        this.sendObject(conID, {name: 'addUser', user: cmd.user, peerID: connection.peerID});
                     }
                 }
             }
@@ -379,22 +406,22 @@ class ChatHandler extends libp2p.CommandHandler {
     // chat API users
     users(info, {users}) {
         this.userMap = new Map();
-        for (var peer in users) {
-            this.userMap.set(peer, users[peer]);
+        for (var peerID in users) {
+            this.userMap.set(peerID, users[peerID]);
         }
         this.showUsers();
     }
     // chat API addUser
-    addUser(info, {peer, user}) {
-        this.userMap.set(peer, user);
+    addUser(info, {peerID, user}) {
+        this.userMap.set(peerID, user);
         this.showUsers();
     }
     // chat API removeUser
-    removeUser(info, {peer}) {
-        this.userMap.delete(peer);
+    removeUser(info, {peerID}) {
+        this.userMap.delete(peerID);
         this.showUsers();
     }
-    send(peer, msg) { // send a message to a peer, optionally using relaying
+    send(peerID, msg) { // send a message to a peer, optionally using relaying
         
     }
     addMessage(msg, me) {
@@ -420,13 +447,13 @@ class ChatHandler extends libp2p.CommandHandler {
     showUsers() {
         var users = [];
 
-        for (var [peer, user] of this.userMap) {
-            users.push({peer: peer, user: user});
+        for (var [peerID, user] of this.userMap) {
+            users.push({peerID, user});
         }
         users.sort((a, b)=> a.user.localeCompare(b.user));
         $('#users').innerHTML = '';
         for (var user of users) {
-            $('#users').innerHTML += "<div title='"+user.peer+"'>"+user.user+"</div>";
+            $('#users').innerHTML += "<div title='"+user.peerID+"'>"+user.user+"</div>";
         }
     }
     sendMessage(text) {
@@ -441,15 +468,15 @@ class ChatHandler extends libp2p.CommandHandler {
                 this.sendObject(id, msg);
             }
         } else if (this.connection.connected) {
-            this.sendObject(this.connection.connectionId, msg);
+            this.sendObject(this.connection.conID, msg);
         }
      }
     connectedToHost(conID, protocol, peerID) {
         if (peerID == this.requestedRelayPeer) {
-            this.connection = {connected: true, connectionId: conID, peer: peerID, protocol: protocol, relay: true};
+            this.connection = {connected: true, conID: conID, peerID, protocol: protocol, relay: true};
             this.relayConnection = conID;
         } else {
-            this.connection = {connected: true, connectionId: conID, peer: peerID, protocol: protocol};
+            this.connection = {connected: true, conID: conID, peerID, protocol: protocol};
             $('#connectStatus').textContent = 'Connected to '+peerID+protocol;
             this.showHideChats(true);
             $('#connect').textContent = 'Disconnect';
@@ -458,9 +485,13 @@ class ChatHandler extends libp2p.CommandHandler {
     }
     sendObject(conID, obj) {
         if (this.usingRelay) {
-            libp2p.sendObject(this.connection.connectionId, {name: 'relay', command: obj});
+            this.relay.sendObject(conID, obj);
+        } else if (conID < 0 && this.delegate instanceof RelayClient) {
+            var info = this.connections.infoByConID.get(conID);
+
+            sendObject(this.relayConID, {name: 'relay', peerID: info.peerID, protocol: info.protocol, command: obj});
         } else {
-            libp2p.sendObject(conID, obj);
+            sendObject(conID, obj);
         }
     }
     changeState(newState) {
@@ -563,8 +594,8 @@ class ChatHandler extends libp2p.CommandHandler {
             this.userMap.set(this.connections.peerID, this.userName);
             this.showUsers();
         }
-        $('#relayForHost').disabled = this.connections.natStatus != 'public';
-        $('#relayRequestHost').disabled = this.connections.natStatus != 'public';
+        $('#relayForHost').disabled = this.connections.natStatus != natStatus.public && this.connections.natStatus != natStatus.maybePublic;
+        $('#relayRequestHost').disabled = this.connections.natStatus != natStatus.public && this.connections.natStatus != natStatus.maybePublic;
     }
     setUser(name) {
         if (name != "" && name != this.userName) {
@@ -586,19 +617,28 @@ class ChatHandler extends libp2p.CommandHandler {
         $('#toHostID').value += ": " + msg;
         this.showHideChats(false);
     }
+    handleCommand(info, data, obj) {
+        if (!this.commands.has(obj.name) && this.isRelaying(info)) {
+            return this.delegate.handleCommand(info, data, obj);
+        } else {
+            return super.handleCommand(info, data, obj);
+        }
+    }
+    isRelaying(info) {
+        return this.relayHost == info.conID || this.relayConID == info.conID || (this.relayService && this.relayService.isRelaying(info));
+    }
     // A relay handles chat commands from its host
     shouldHandleCommand(info, data, obj) {
-        return super.shouldHandleCommand(info, data, obj) || (this.relayHost == info.conID && this.commands.has(obj.name));
+        return super.shouldHandleCommand(info, data, obj) || this.isRelaying(info);
     }
     relayFor(requestingPeer) {
         if (!this.relaying) {
-            this.relayService = new libp2p.RelayService(this.connections, {
-                __proto__: libp2p.BlankHandler.prototype,
+            this.relayService = new RelayService(this.connections, null, {
                 requestHosting: this.requestHosting.bind(this),
                 //receiveRelayConnection: this.receiveRelayConnection.bind(this),
                 //receiveRelayCallbackRequest: this.receiveRelayCallbackRequest.bind(this),
-                receiveRelay: this.receiveRelay.bind(this),
-            }, relayProtocol, callbackProtocol, true, true);
+                //receiveRelay: this.receiveRelay.bind(this),
+            }, relayProtocol, callbackProtocol);
             this.delegate = this.relayService;
             this.relaying = true;
             this.relayService.startRelay();
@@ -621,21 +661,15 @@ class ChatHandler extends libp2p.CommandHandler {
             alert('bad relay string');
             return;
         }
+        this.relayInfo = relayInfo;
         this.requestedRelayPeer = relayInfo.relayID;
-        this.connection = {connecting: true, peer: relayInfo.relayID, protocol: relayInfo.protocol, relay: true};
+        this.connection = {connecting: true, peerID: relayInfo.relayID, protocol: relayInfo.protocol, relay: true};
         this.changeState(chatState.connectingToRelayForHosting);
         this.callbacks = new Map();
         this.relayNextId = -1;
-        this.relayConnectionIds = new Map();
+        this.relayConIDs = new Map();
         this.relayConnectionPeers = new Map();
-        this.relayService = new libp2p.RelayService(this.connections, {
-            __proto__: libp2p.BlankHandler.prototype,
-            //requestHosting: this.requestHosting.bind(this),
-            receiveRelayConnection: this.receiveRelayConnection.bind(this),
-            receiveRelayCallbackRequest: this.receiveRelayCallbackRequest.bind(this),
-            receiveRelay: this.receiveRelay.bind(this),
-        }, relayProtocol, true, true);
-        libp2p.connect(encodePeerId(relayInfo.relayID, relayInfo.addrs), relayInfo.protocol, true);
+        connect(encodePeerId(relayInfo.relayID, relayInfo.addrs), relayInfo.protocol, true);
     }
     showRelayInfo() {
         if (this.relaying && this.relayService.allowedHosts) {
@@ -649,9 +683,9 @@ class ChatHandler extends libp2p.CommandHandler {
                 conSet.add(i.peerID);
                 peersDiv.appendChild(relayDiv(i));
             }
-            for (var [peer, prots] of this.relayService.allowedHosts) {
-                if (!conSet.has(peer)) {
-                    peersDiv.appendChild(pendingDiv(peer, prots));
+            for (var [peerID, prots] of this.relayService.allowedHosts) {
+                if (!conSet.has(peerID)) {
+                    peersDiv.appendChild(pendingDiv(peerID, prots));
                 }
             }
         }
@@ -692,12 +726,12 @@ class ChatHandler extends libp2p.CommandHandler {
 }
 
 function encodeObject(obj) {
-        return libp2p.encode_ascii85(JSON.stringify(obj));
+        return encode_ascii85(JSON.stringify(obj));
 }
 
 function decodeObject(str) {
     try {
-        return JSON.parse(libp2p.decode_ascii85(str));
+        return JSON.parse(decode_ascii85(str));
     } catch (err) {
         return null;
     }
@@ -712,13 +746,13 @@ function relayDiv(info) {
     return parse("<div id='relay-"+info.peerID+"' title='"+html+"'>"+html+"</div>");
 }
 
-function pendingDiv(peer, prots) {
-    var html = "PENDING "+peer+":";
+function pendingDiv(peerID, prots) {
+    var html = "PENDING "+peerID+":";
 
     for (var prot of prots) {
         html += " " + prot;
     }
-    return parse("<div id='relay-"+peer+"' title='"+html+"'>"+html+"</div>");
+    return parse("<div id='relay-"+peerID+"' title='"+html+"'>"+html+"</div>");
 }
 
 function parse(html) {
@@ -735,12 +769,8 @@ function parse(html) {
     return result;
 }
 
-function peer(p) {
-    return (interfaceIP || '') + p;
-}
-
 function encodePeerId(peerID, addrs) {
-    return '/addrs/'+libp2p.encode_ascii85(JSON.stringify({peerID, addrs}));
+    return '/addrs/'+encode_ascii85(JSON.stringify({peerID, addrs}));
 }
 
 function start() {
@@ -748,7 +778,7 @@ function start() {
     var url = "ws://"+document.location.host+"/";
     var connections = {};
     var handler = new ChatHandler(connections);
-    var trackingHandler = new libp2p.TrackingHandler(handler, connections);
+    var trackingHandler = new TrackingHandler(handler, connections);
     var search = document.location.search.match(/\?(.*)/);
     var params = null;
 
@@ -765,7 +795,7 @@ function start() {
     if (document.port) {
         url += ":" + document.port;
     }
-    libp2p.start(url + "ipfswsrelay", new libp2p.LoggingHandler(trackingHandler));
+    libp2p.start(url + "ipfswsrelay", new LoggingHandler(trackingHandler));
     $('#host').onclick = ()=> {
         switch (handler.state) {
         case chatState.disconnected: // start hosting
@@ -784,12 +814,12 @@ function start() {
             }
             handler.protocol = protocol;
             handler.protocols.add(protocol);
-            if (handler.connections.natStatus == 'public') {
+            if (handler.connections.natStatus == natStatus.public || handler.connections.natStatus == natStatus.maybePublic) {
                 handler.hostingDirectly = true;
                 $('#host').textContent = "Stop Hosting";
                 $('#connect').disabled = true;
                 $('#connectString').value = 'WAITING TO ESTABLISH LISTENER ON '+handler.protocol;
-                libp2p.listen(handler.protocol, true);
+                listen(handler.protocol, true);
                 handler.changeState(chatState.hostingDirectly);
             } else {
                 handler.useRelay($('#hostingRelay').value);
@@ -800,15 +830,15 @@ function start() {
             break;
         case chatState.hostingDirectly:  // stop hosting
             $('#host').disabled = true;
-            libp2p.stop(handler.protocol);
+            stop(handler.protocol);
             handler.changeState(chatState.stoppingHosting);
             break;
         case chatState.connectedToRelayForHosting:  // stop hosting
-            libp2p.close(handler.relayConnection);
+            close(handler.relayConnection);
             handler.relayConnection = null;
             handler.changeState(chatState.stoppingHosting);
             break;
-        case chatState.connectingToHost: // these should not happen; the host button is disabled
+        case chatState.connectingToHost: // these should never happen; the host button is disabled
         case chatState.connectedToHost:
         case chatState.stoppingHosting:
         case chatState.connectingToRelayForConnection:
@@ -824,15 +854,16 @@ function start() {
     $('#connect').onclick = ()=> {
         switch (handler.state) {
         case chatState.disconnected: // connect
-            var {peerID, relayID, protocol, addrs} = JSON.parse(libp2p.decode_ascii85($('#toHostID').value));
+            var {peerID, relayID, protocol, addrs} = JSON.parse(decode_ascii85($('#toHostID').value));
 
             handler.chatHost = peerID;
             handler.chatProtocol = protocol;
             handler.protocols.add(protocol);
             if (relayID) {
                 handler.requestedRelayPeer = relayID;
-                if (handler.connections.natStatus != 'public') {
+                if (handler.connections.natStatus != natStatus.public && handler.connections.natStatus != natStatus.maybePublic) {
                     handler.changeState(chatState.connectingToRelayForConnection);
+                    connect(encodePeerId(relayID, addrs), relayProtocol, true);
                 } else {
                     var token = '';
 
@@ -843,14 +874,14 @@ function start() {
                     }
                     handler.token = token;
                     handler.changeState(chatState.awaitingToken);
+                    connect(encodePeerId(relayID, addrs), callbackProtocol, true);
                 }
-                libp2p.connect(encodePeerId(relayID, addrs), relayProtocol, true);
             } else {
                 handler.changeState(chatState.connectingToHost);
-                libp2p.connect(encodePeerId(peerID, addrs), protocol, true);
+                connect(encodePeerId(peerID, addrs), protocol, true);
             }
             $('#connect').textContent = 'Abort Connection';
-            handler.connection = {connecting: true, peer: peerID, protocol: protocol};
+            handler.connection = {connecting: true, peerID, protocol: protocol};
             break;
         case chatState.connectingToHost:  // abort connection
         case chatState.connectingToRelayForConnection:
@@ -858,11 +889,11 @@ function start() {
             handler.connection.abort = true;
             break;
         case chatState.connectedToHost: // disconnect
-            libp2p.close(handler.connection.connectionId);
+            close(handler.connection.conID);
             handler.changeState(chatState.disconnectingFromHost);
             break;
         case chatState.connectedToRelayForConnection: // disconnect
-            libp2p.close(handler.connection.connectionId);
+            close(handler.connection.conID);
             handler.changeState(chatState.disconnectingFromRelayForConnection);
             break;
         case chatState.abortingRelayHosting: // these should not happen; the connect button is disabled
@@ -872,7 +903,6 @@ function start() {
         case disconnectingFromRelayForHosting:
         case disconnectingFromRelayForConnection:
         case connectingToRelayForHosting:
-        case connectingToRelayForConnection:
         case hostingDirectly:
         case connectedToRelayForHosting:
             break;

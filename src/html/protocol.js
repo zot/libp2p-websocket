@@ -153,8 +153,9 @@ function discoveryListen(protocol, frames) {
     ws.send(Uint8Array.from([cmsg.discoveryListen, frames ? 1 : 0, ...utfEncoder.encode(protocol)]));
 }
 
-function stop(protocol) {
-    ws.send(Uint8Array.from([cmsg.stop, ...utfEncoder.encode(protocol)]));
+// stop listening but do not close connections
+function stop(protocol, retainConnections) {
+    ws.send(Uint8Array.from([cmsg.stop, retainConnections ? 1 : 0, ...utfEncoder.encode(protocol)]));
 }
 
 function connect(peerID, prot, frames, relay) {
@@ -445,19 +446,8 @@ class TrackingHandler extends DelegatingHandler {
         super.listenerConnection(conID, peerID, prot);
     }
     connectionClosed(conID, msg) {
-        var info = this.connections.infoByConID.get(conID);
-
         super.connectionClosed(conID, msg);
-        if (info) {
-            var cons = this.connections.conIDsByPeerID.get(info.peerID);
-
-            if (cons) {
-                cons.delete(conID);
-                cons.delete(info.protocol);
-                if (cons.size == 0) this.connections.conIDsByPeerID.delete(info.peerID);
-            }
-            this.connections.infoByConID.delete(conID);
-        }
+        cleanupConnections(this.connections, conID);
     }
     listenerClosed(protocol) {
         super.listenerClosed(protocol);
@@ -513,6 +503,7 @@ const relayClientCommands = Object.freeze({
     receiveRelayCallbackRequest: true,
     receiveRelayConnectionToHost: true,
     receiveRelayConnectionFromPeer: true,
+    relayConnectionClosed: true,
 });
 
 const relayErrors = Object.freeze({
@@ -521,6 +512,7 @@ const relayErrors = Object.freeze({
     badCommand: "badRelayCommand",
     relayingError: "relayingError",
     badProtocol: "badRelayProtocol",
+    badCallback: "badCallback",
 });
 
 /* Handler that runs a relay service
@@ -529,25 +521,28 @@ const relayErrors = Object.freeze({
  *  Listens on a framed protocol for relay commands, which are JSON commands
  *  COMMANDS:
  *   name: 'requestHosting', protocol: PROTOCOL -- a host is requesting relaying
- *   name: 'requestCallback', peer: peerID, protocol: PROTOCOL, callbackProtocol: PROTOCOL, token: TOKEN -- a public peer is requesting a callback from a relayed host
- *   name: 'requestRelaying', peer: peerID, protocol: PROTOCOL -- a private peer is requesting relaying to a host
- *   name: 'closeRelayConnection', peer: PEERID, protocol: PROTOCOL -- a host is closing a connection
- *   name: 'relay', peer: PEERID, protocol: PROTOCOL, command: COMMAND -- send COMMAND to peer with id PEERID
- *   ---- in the future, we can have an authorize to restrict peer connections
+ *   name: 'requestCallback', peerID: peerID, protocol: PROTOCOL, callbackProtocol: PROTOCOL, token: TOKEN -- a public peer is requesting a callback from a relayed host
+ *   name: 'requestRelaying', peerID: peerID, protocol: PROTOCOL -- a private peer is requesting relaying to a host
+ *   name: 'closeRelayConnection', peerID: PEERID, protocol: PROTOCOL -- a host is closing a connection
+ *   name: 'relay', peerID: PEERID, protocol: PROTOCOL, command: COMMAND -- send COMMAND to peer with id PEERID
+ *   ---- in the future, we can have an authorize command to restrict peer connections
+ *
+ *  COMMANDS TO CALLBACK HOSTS:
+ *   name: 'callback', peerID: peerID, protocol: PROTOCOL, token: TOKEN -- a private host is accepting a public peer's callback request after connecting to the public peer
  *
  *  COMMANDS TO HOSTS: -- commands to a host, after it has issued an approved host command
- *   name: 'receiveRelayConnection', peer: PEERID, protocol: PROTOCOL
- *   name: 'receiveRelay', peer: PEERID, protocol: PROTOCOL, command: COMMAND
- *   name: 'receiveRelayCallbackRequest', peer: PEERID, protocol: PROTOCOL, callbackProtocol: PROTOCOL, token: TOKEN
+ *   name: 'receiveRelayConnection', peerID: PEERID, protocol: PROTOCOL
+ *   name: 'receiveRelay', peerID: PEERID, protocol: PROTOCOL, command: COMMAND
+ *   name: 'receiveRelayCallbackRequest', peerID: PEERID, protocol: PROTOCOL, callbackProtocol: PROTOCOL, token: TOKEN
+ *   name: 'relayConnectionClosed', peerID: PEERID, protocol: PROTOCOL -- relay connection was closed
  */
 class RelayService extends CommandHandler {
     // if connections is null, it uses itself for connection information
-    constructor(connections, delegate, relayReceiver, relayProtocol, callbackProtocol) {
-        super(delegate, connections, relayServiceCommands, false, [relayProtocol, callbackProtocol]);
+    constructor(connections, delegate, relayReceiver, relayProtocol) {
+        super(delegate, connections, relayServiceCommands, false, [relayProtocol]);
         this.relayReceiver = relayReceiver;
         this.relayReceiver.delegate = delegate;
         this.relayProtocol = relayProtocol;
-        this.callbackProtocol = callbackProtocol;
         this.relayConnections = new Map(); // map of conID -> relay connection info
         this.relayPeers = new Map();       // map of peerID -> relay connection info
         this.allowedPeers = null;          // if not null, a set of peers allowed to connect
@@ -555,7 +550,6 @@ class RelayService extends CommandHandler {
     }
     startRelay() {
         listen(this.relayProtocol, true);
-        listen(this.callbackProtocol, true);
     }
     // P2P API
     connectionClosed(conID, msg) {
@@ -592,13 +586,13 @@ class RelayService extends CommandHandler {
         }
     }
     // RELAY CMD API
-    requestCallback(info, {peerID, protocol, callbackProtocol, token}) {
+    requestCallback(info, {peerID, protocol, callbackProtocol, token, callbackPeer}) {
         var relayPeer = this.relayPeers.get(peerID);
 
         if (!relayPeer) {
             connectionError(info.conID, relayErrors.notConnected, 'Relay not connected to requested peer: '+peerID, true, {peerID});
         } else {
-            sendObject(relayPeer.conID, {name: 'receiveRelayCallbackRequest', peerID: info.peerID, protocol, callbackProtocol, token});
+            sendObject(relayPeer.conID, {name: 'receiveRelayCallbackRequest', peerID: info.peerID, protocol, callbackProtocol, token, callbackPeer});
             tryDelegate(this.relayReceiver, 'requestCallback', arguments);
             close(info.conID);
         }
@@ -635,6 +629,15 @@ class RelayService extends CommandHandler {
 
                 if (!relayPeer) return;
                 tryDelegate(this.relayReceiver, 'closeRelayConnection', arguments);
+                for (var hostJson of relayPeer.connectionsToHosts) {
+                    var [rpeerID, rpeerProtocol] = JSON.parse(hostJson);
+                    var hostInfoProts = this.connections.conIDsByPeerID.get(rpeerID);
+                    var hostInfo;
+
+                    if (hostInfo && (hostInfo = hostInfoProts.get(protocol))) {
+                        sendObject(hostInfo.conID, {name: 'relayConnectionClosed', peerID, protocol});
+                    }
+                }
                 info.connectionsFromPeers.delete(JSON.stringify([peerID, protocol]));
                 relayPeer.connectionsToHosts.delete(JSON.stringify([info.peerId, protocol]));
                 if (relayPeer.hostedProtocols.size == 0 && relayPeer.connectionsToHosts.size == 0 && relayPeer.connectionsFromPeers.size == 0) {
@@ -659,15 +662,15 @@ class RelayService extends CommandHandler {
     // RELAY CMD API
     receiveRelay(info, {peerID, command}) {
         this.delegate.handleCommmand(info, null, command);
-        this.relayReceiver.receiveRelay(...arguments);
+        tryDelegate(this.relayReceiver, 'receiveRelay', arguments);
     }
     // RELAY CMD API
     receiveRelayCallbackRequest(info, cmd) {
-        this.relayReceiver.receiveRelayCallbackRequest(...arguments);
+        tryDelegate(this.relayReceiver, 'receiveRelayCallbackRequest', arguments);
     }
     // RELAY CMD API
     receiveRelayConnection(info, cmd) {
-        this.relayReceiver.receiveRelayConnection(...arguments);
+        tryDelegate(this.relayReceiver, 'receiveRelayConnection', arguments);
     }
     isRelaying(info) {
         return info && info.hostedProtocols;
@@ -725,6 +728,7 @@ class RelayService extends CommandHandler {
 class RelayClient extends CommandHandler {
     constructor(connections, handler, delegate, protocol) {
         super(delegate, connections, relayClientCommands, [protocol]);
+        this.protocol = protocol;
         this.connections = connections;
         this.handler = handler;
         this.nextConnection = -1;
@@ -737,16 +741,26 @@ class RelayClient extends CommandHandler {
             this.closeRelayConnection(peerID);
         }
     }
-    closeRelayConnection(peerID) {
+    closeRelayConnection(peerID, protocol) {
         libp2p.sendObject(this.relayConnection, {
             name: 'closeRelayConnection',
             peerID,
             protocol,
         });
+        tryDelegate(this.handler, 'closeRelayConnection', arguments);
+    }
+    // RELAY CMD API
+    relayConnectionClosed(info, {peerID, protocol}) {
+        var info = getInfoForPeerAndProtocol(this.connections, peerID, protocol);
+
+        if (info) {
+            this.connectionClosed(info.conID);
+        }
         tryDelegate(this.handler, 'relayConnectionClosed', arguments);
     }
-    connectionClosed(conID) {
-        /// TODO 
+    // P2P API
+    connectionClosed(conID, msg) {
+        cleanupConnections(this.connections, conID);
     }
     addConnection(peerID, protocol, incoming) {
         var id = this.nextConnection--;
@@ -779,8 +793,27 @@ class RelayClient extends CommandHandler {
 }
 
 class RelayHost extends RelayClient {
-    constructor(connections, handler, delegate, protocol) {
+    constructor(connections, handler, delegate, protocol, mainProtocol) {
         super(connections, handler, delegate, protocol);
+        this.mainProtocol = mainProtocol;
+        this.callbacks = new Map();
+    }
+    callingBack(conID) {
+        var info = this.connections.infoByConID.get(conID);
+
+        return info && this.callbacks.has(info.peerID);
+    }
+    peerConnection(conID, peerID, prot) {
+        super.peerConnection(conID, peerID, prot);
+        if (this.callingBack(conID)) {
+            sendObject(conID, {
+                peerID: this.connections.peerID,
+                protocol: this.mainProtocol,
+                token: this.callbacks.get(peerID),
+            });
+            this.callbacks.delete(peerID);
+        }
+        tryDelegate(this.delegate, 'peerConnection', arguments);
     }
     // RELAY CMD API
     receiveRelayConnectionFromPeer(conID, {peerID, protocol}) {
@@ -788,12 +821,14 @@ class RelayHost extends RelayClient {
         tryDelegate(this.handler, 'receiveRelayConnectionFromPeer', arguments);
     }
     // RELAY CMD API
-    receiveRelayCallbackRequest(info, {peerID, protocol, callbackPeer, callbackProtocol, token}) {
+    receiveRelayCallbackRequest(info, {peerID, protocol, callbackProtocol, token, callbackPeer}) {
         if (this.protocol == this.protocol) {
-            this.callbacks.set(callbackPeer, token);
-            libp2p.connect(callbackPeer, callbackProtocol, true);
+            this.callbacks.set(peerID, token);
+            connect(callbackPeer || peerID, callbackProtocol, true);
+            tryDelegate(this.handler, 'receiveRelayCallbackRequest', arguments);
+        } else {
+            this.closeRelayConnection(info.conID, info.protocol);
         }
-        tryDelegate(this.handler, 'receiveRelayCallbackRequest', arguments);
     }
 }
     
@@ -824,6 +859,21 @@ function getInfoForPeerAndProtocol(connections, peerID, protocol) {
     if (cons && cons.has(cons.get(protocol))) {
         return connections.infoByConID.get(cons.get(protocol));
     }
+}
+
+function cleanupConnections(connections, conID) {
+    var info = connections.infoByConID.get(conID);
+
+    if (info) {
+        var cons = connections.conIDsByPeerID.get(info.peerID);
+
+        if (cons) {
+            cons.delete(conID);
+            cons.delete(info.protocol);
+            if (cons.size == 0) connections.conIDsByPeerID.delete(info.peerID);
+        }
+    }
+    connections.infoByConID.delete(conID);
 }
 
 function start(urlStr, handler) {
@@ -1049,4 +1099,5 @@ export default {
     decode_ascii85,
     natStatus,
     getInfoForPeerAndProtocol,
+    relayErrors,
 }

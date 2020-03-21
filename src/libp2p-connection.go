@@ -229,11 +229,11 @@ func (r *libp2pRelay) listen(announceMsg messageType, msgType messageType, c *li
 }
 
 // STOP LISTENER API METHOD
-func (r *libp2pRelay) Stop(c *client, protocol string) {
+func (r *libp2pRelay) Stop(c *client, protocol string, retainConnections bool) {
 	lc := getLibp2pClient(c)
 	listener := lc.listeners[protocol]
 	if listener != nil {
-		listener.close()
+		listener.close(retainConnections)
 	} else if lc.monitoring[protocol] {
 		delete(lc.monitoring, protocol)
 		c.writePackedMessage(smsgListenerClosed, protocol)
@@ -270,7 +270,7 @@ func (r *libp2pRelay) Close(c *client, id uint64) {
 	lis := getLibp2pClient(c).listenerConnections[id]
 	if lis != nil {
 		fmt.Printf("CLOSING HOST CONNECTION %d\n", id)
-		lis.closeConnection(id)
+		lis.removeConnection(id, false)
 	}
 	fwd := getLibp2pClient(c).forwarders[id]
 	if fwd != nil {
@@ -283,14 +283,14 @@ func (r *libp2pRelay) Close(c *client, id uint64) {
 
 // SEND DATA API METHOD
 func (r *libp2pRelay) Data(c *client, id uint64, data []byte) {
-	var con *libp2pConnection
 	lc := getLibp2pClient(c)
-	lis := lc.listenerConnections[id]
+	con := lc.forwarders[id]
 
-	if lis != nil {
-		con = lis.connections[id]
-	} else {
-		con = lc.forwarders[id]
+	if con == nil {
+		lis := lc.listenerConnections[id]
+		if lis != nil {
+			con = lis.connections[id]
+		}
 	}
 	if con != nil {
 		fmt.Println("@@@ WRITING DATA TO CONNECTION")
@@ -530,7 +530,7 @@ func (r *libp2pRelay) monitorCallbackRequests(c *libp2pClient, frames bool, prot
 				peerChan, err := r.discovery.FindPeers(ctx, cbprot)
 				if err != nil {
 					logLine("Error finding peers: %s", err.Error())
-					lis.close()
+					lis.close(false)
 					break
 				}
 				count := 0
@@ -712,9 +712,9 @@ func createListener() *listener {
 	return lis
 }
 
-func (l *listener) close() {
+func (l *listener) close(retainConnections bool) {
 	for id := range l.connections {
-		l.closeConnection(id)
+		l.removeConnection(id, retainConnections)
 	}
 	l.client.writePackedMessage(smsgListenerClosed, l.protocol)
 	l.closePrim()
@@ -729,13 +729,21 @@ func (l *listener) closePrim() {
 	l.closed = true
 }
 
-func (l *listener) closeConnection(id uint64) {
-	fmt.Println("CLOSING SERVICE CONNECTION ", id)
-	l.connections[id].close(func() {
+func (l *listener) removeConnection(id uint64, retainConnections bool) {
+	if retainConnections {
+		fmt.Println("RETAINING SERVICE CONNECTION ", id)
 		svc(l.client, func() {
+			l.client.forwarders[id] = l.connections[id]
 			delete(l.client.listenerConnections, id)
 		})
-	})
+	} else {
+		fmt.Println("CLOSING SERVICE CONNECTION ", id)
+		l.connections[id].close(func() {
+			svc(l.client, func() {
+				delete(l.client.listenerConnections, id)
+			})
+		})
+	}
 	delete(l.connections, id)
 }
 

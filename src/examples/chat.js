@@ -50,6 +50,9 @@ var {
     listen,
     connect,
     getInfoForPeerAndProtocol,
+    relayErrors,
+    connectionError,
+    getString,
 } = libp2p;
 
 /// simplementation of jQuery
@@ -120,11 +123,13 @@ const chatState = Object.freeze({
     connectingToHost: 7,
     connectingToRelayForHosting: 8,
     connectingToRelayForConnection: 9,
-    awaitingToken: 10,
-    connectedToHost: 11,
-    hostingDirectly: 12,
-    connectedToRelayForHosting: 13,
-    connectedToRelayForConnection: 14,
+    connectingToRelayForCallback: 10,
+    awaitingTokenConnection: 11,
+    awaitingToken: 12,
+    connectedToHost: 13,
+    hostingDirectly: 14,
+    connectedToRelayForHosting: 15,
+    connectedToRelayForConnection: 16,
 });
 
 // TODO split this into server and client command handlers
@@ -184,18 +189,33 @@ class ChatHandler extends CommandHandler {
             this.hosting.set(conID, {conID: conID, peerID, protocol: prot});
             //this.connection = {connected: true, hosted: true};
         } else if (prot == callbackProtocol) { // got a callback, verify token later
-            this.awaitingToken = true;
+            if (this.state != chatState.awaitingTokenConnection || peerID != this.callbackPeer) {
+                connectionError(conID, relayErrors.badCallback, 'Unexpected callback peer', true);
+                return;
+            } else if (this.connection.abort) {
+                this.abortCallback();
+                return;
+            }
+            this.changeState(chatState.awaitingToken);
         }
         super.listenerConnection(conID, peerID, prot);
     }
+    abortCallback() {
+        stop(callbackProtocol, false);
+        close(this.callbackRelayConID);
+        this.reset();
+    }
     // P2P API
     peerConnection(conID, peerID, protocol) {
-        super.peerConnection(conID, peerID, protocol);
-        if (this.callbacks && this.callbacks.has(peerID)) { // patch connection to look like it's incoming
-            var con = getConnectionInfo(conID);
-            con.protocol = this.protocol;
+        if (this.delegate instanceof RelayHost && this.delegate.callingBack(conID)) { // patch connection to look like it's incoming
+            var info = getConnectionInfo(this.connections, conID);
+
+            info.protocol = this.protocol;
+            super.peerConnection(conID, peerID, protocol);
+            this.listenerConnection(info.conID, info.peerID, this.protocol); // fake a listener connection
             return;
         }
+        super.peerConnection(conID, peerID, protocol);
         switch (this.state) {
         case chatState.abortingRelayHosting:
         case chatState.abortingRelayConnection:
@@ -231,9 +251,9 @@ class ChatHandler extends CommandHandler {
                 this.delegate = new RelayHost(this.connections, this, {
                     //receiveRelay: this.receiveRelay.bind(this),
                     receiveRelayConnectionFromPeer: this.receiveRelayConnectionFromPeer.bind(this),
-                    //receiveRelayCallbackRequest: this.receiveRelayCallbackRequest.bind(this),
+                    receiveRelayCallbackRequest: this.receiveRelayCallbackRequest.bind(this),
                     relayConnectionClosed: this.relayConnectionClosed.bind(this),
-                }, relayProtocol);
+                }, relayProtocol, this.protocol);
                 this.commandConnections.add(conID);
                 //this.connections.infoByConID.get(conID).hosted = true;
                 this.connection.hosted = true;
@@ -260,6 +280,25 @@ class ChatHandler extends CommandHandler {
                 this.relayConID = conID;
             }
             break;
+        case chatState.connectingToRelayForCallback: // connected to relay
+            if (peerID != this.callbackRelay) {
+                alert('Connected to unexpected host: ' + peerID + ', expecting relay peer: ' + this.callbackRelay);
+            } else if (this.connection.abort) {
+                this.callbackRelayConID = conID;
+                this.abortCallback();
+            } else {
+                sendObject(conID, {
+                    name: 'requestCallback',
+                    peerID: this.chatHost,
+                    callbackPeer: encodePeerId(this.connections.peerID, this.peerAddrs),
+                    protocol: this.chatProtocol,
+                    callbackProtocol: callbackProtocol,
+                    token: this.token,
+                });
+                this.callbackRelayConID = conID;
+                this.changeState(chatState.awaitingTokenConnection);
+            }
+            break;
         case chatState.hostingDirectly: // got new direct chat connection -- nothing more needed
         case chatState.disconnected: // these next cases should never happen
         case chatState.stoppingHosting:
@@ -269,6 +308,7 @@ class ChatHandler extends CommandHandler {
         case chatState.connectedToHost:
         case chatState.connectedToRelayForHosting:
         case chatState.awaitingToken:
+        case chatState.awaitingTokenConnection:
             break;
         }
     }
@@ -277,12 +317,29 @@ class ChatHandler extends CommandHandler {
         var con = getConnectionInfo(this.connections, conID);
 
         if (this.state == chatState.awaitingToken && con.protocol == callbackProtocol) {
-            if (getString(data) == this.awaitingToken) {
+            if (this.connection.abort) {
+                this.abortCallback();
+                return;
+            }
+            if (!obj) {
+                try {
+                    obj = JSON.parse(getString(data));
+                } catch (err) {
+                    return connectionError(conID, relayErrors.badCommand, 'Bad command, could not parse JSON', true);
+                }
+            }
+            var {peerID, protocol, token} = obj;
+
+            if (token == this.token && peerID == this.callbackPeer) {
+                con.protocol = protocol;
                 this.awaitingToken = null;
                 this.changeState(chatState.connectedToHost);
-                stop(callbackProtocol);
+                //stopping the protocol appears to sever all of the protocol connections
+                //stop(callbackProtocol, true);
+                this.changeState(chatState.connectingToHost);
+                this.peerConnection(conID, peerID, protocol);
             } else {
-                close(conID);
+                connectionError(conID, relayErrors.badCallback, 'Bad token', true);
             }
         } else {
             super.data(conID, data, obj);
@@ -295,7 +352,7 @@ class ChatHandler extends CommandHandler {
     }
     // P2P API
     connectionClosed(conID, msg) {
-        if (this.state = chatState.connectedToRelayForHosting && conID == this.relayConnection) {
+        if (this.state == chatState.connectedToRelayForHosting && conID == this.relayConnection) {
             this.relayConnection = null;
             this.reset();
         } else if (this.connection.hosted) {
@@ -336,8 +393,8 @@ class ChatHandler extends CommandHandler {
         this.commandConnections.add(info.conID);
         this.connection.connected = true;
         this.connection.conID = info.conID;
-        $('#relayForhost').textContent = 'Stop relaying';
         this.sendObject(info.conID, {name: 'user', user: this.userName});
+        document.body.classList.add('connected');
     }
     // RELAY API
     //requestCallback(info, {peerID, protocol, callbackProtocol, token}) {}
@@ -365,11 +422,14 @@ class ChatHandler extends CommandHandler {
         }
     }
     // RELAY API
-    //receiveRelayCallbackRequest(info, {peerID, protocol, command}) {}
+    receiveRelayCallbackRequest(info, {peerID, protocol, callbackProtocol, token}) {
+        //connect(peerID, protocol, true);
+    }
     // RELAY API
     //receiveRelay(info, {peerID, protocol, command}) {}
     // RELAY API
-    relayConnectionClosed(conID) {
+    relayConnectionClosed(info, {peerID, protocol}) {
+        connectionClosed(info.conID);
     }
     // chat API message
     message(info, msg) {
@@ -497,6 +557,7 @@ class ChatHandler extends CommandHandler {
     changeState(newState) {
         if (newState != chatState.disconnected) {
             document.body.classList.add('active');
+            document.body.classList.add('choiceLocked');
         }
         if (!this.relayRequester) {
             switch(newState) {
@@ -506,7 +567,9 @@ class ChatHandler extends CommandHandler {
                 break;
             case chatState.connectingToHost:
             case chatState.connectingToRelayForConnection:
+            case chatState.connectingToRelayForCallback:
             case chatState.awaitingToken:
+            case chatState.awaitingTokenConnection:
                 document.body.classList.add('peer');
                 break;
             }
@@ -517,6 +580,8 @@ class ChatHandler extends CommandHandler {
             document.body.classList.remove('peer');
             document.body.classList.remove('host');
             document.body.classList.remove('relay');
+            document.body.classList.remove('choiceLocked');
+            document.body.classList.remove('connected');
             $('#host').disabled = false;
             $('#host').textContent = 'Host';
             $('#hostingRelay').readOnly = false;
@@ -545,7 +610,9 @@ class ChatHandler extends CommandHandler {
             break;
         case chatState.connectingToHost:
         case chatState.connectingToRelayForConnection:
+        case chatState.connectingToRelayForCallback:
         case chatState.awaitingToken:
+        case chatState.awaitingTokenConnection:
             $('#host').disabled = true;
             $('#hostingRelay').readOnly = true;
             $('#hostingRelay').value = '';
@@ -555,12 +622,14 @@ class ChatHandler extends CommandHandler {
             $('#connect').textContent = 'Disconnect';
             $('#connect').disabled = false;
             $('#toHostID').readOnly = true;
+            document.body.classList.add('connected');
             break;
         case chatState.hostingDirectly:
         case chatState.connectedToRelayForHosting:
             $('#host').disabled = false;
             $('#host').textContent = 'Stop Hosting';
             $('#hostingRelay').readOnly = true;
+            this.showHideChats(true);
             break;
         case chatState.disconnectingFromRelayForHosting:
             $('#host').disabled = true;
@@ -576,19 +645,24 @@ class ChatHandler extends CommandHandler {
         this.state = newState;
     }
     reset() {
-        this.state = chatState.disconnected;
         this.protocol = null;
         this.stopping = false;
         this.hostingDirectly = false;
         this.hostingThroughRelay = false;
         this.connection = {disconnected: true};
         this.showHideChats(false);
+        this.callbackRelayConID = null;
+        this.token = null;
+        this.relayConID = null;
+        $('#connectStatus').textContent = '';
         $('#connectString').value = '';
         $('#connect').disabled = false;
         $('#connect').textContent = 'Connect';
         $('#toHostID').value = '';
         $('#toHostID').disabled = false;
+        $('#toHostID').readOnly = false;
         $('#send').value = '';
+        $('#hostingRelay').readOnly = false;
         this.userMap = new Map();
         if (this.userName && this.connections.peerID) {
             this.userMap.set(this.connections.peerID, this.userName);
@@ -596,6 +670,7 @@ class ChatHandler extends CommandHandler {
         }
         $('#relayForHost').disabled = this.connections.natStatus != natStatus.public && this.connections.natStatus != natStatus.maybePublic;
         $('#relayRequestHost').disabled = this.connections.natStatus != natStatus.public && this.connections.natStatus != natStatus.maybePublic;
+        this.changeState(chatState.disconnected);
     }
     setUser(name) {
         if (name != "" && name != this.userName) {
@@ -638,14 +713,16 @@ class ChatHandler extends CommandHandler {
                 //receiveRelayConnection: this.receiveRelayConnection.bind(this),
                 //receiveRelayCallbackRequest: this.receiveRelayCallbackRequest.bind(this),
                 //receiveRelay: this.receiveRelay.bind(this),
-            }, relayProtocol, callbackProtocol);
+            }, relayProtocol);
             this.delegate = this.relayService;
             this.relaying = true;
             this.relayService.startRelay();
+            $('#relayForhost').textContent = 'Stop relaying';
         }
         this.relayService.enableRelay(requestingPeer, chatProtocol);
         this.relayRequester = requestingPeer;
         document.body.classList.add('relay');
+        document.body.classList.add('choicelocked');
         $('#relayConnectString').value = encodeObject({
             type: 'relayAddr',
             relayID: this.connections.peerID,
@@ -773,6 +850,21 @@ function encodePeerId(peerID, addrs) {
     return '/addrs/'+encode_ascii85(JSON.stringify({peerID, addrs}));
 }
 
+function checkedPanelSelector(evt) {
+    document.body.classList.remove('showConnect');
+    document.body.classList.remove('showHost');
+    document.body.classList.remove('showRelay');
+    if ($('#showConnect').checked) {
+        document.body.classList.add('showConnect');
+    }
+    if ($('#showHost').checked) {
+        document.body.classList.add('showHost');
+    }
+    if ($('#showRelay').checked) {
+        document.body.classList.add('showRelay');
+    }
+}
+
 function start() {
     console.log("START");
     var url = "ws://"+document.location.host+"/";
@@ -782,6 +874,7 @@ function start() {
     var search = document.location.search.match(/\?(.*)/);
     var params = null;
 
+    handler.trackingHandler = trackingHandler;
     if (search) {
         params = {};
         for (var param of search[1].split('&')) {
@@ -830,7 +923,7 @@ function start() {
             break;
         case chatState.hostingDirectly:  // stop hosting
             $('#host').disabled = true;
-            stop(handler.protocol);
+            stop(handler.protocol, false);
             handler.changeState(chatState.stoppingHosting);
             break;
         case chatState.connectedToRelayForHosting:  // stop hosting
@@ -842,7 +935,9 @@ function start() {
         case chatState.connectedToHost:
         case chatState.stoppingHosting:
         case chatState.connectingToRelayForConnection:
+        case chatState.connectingToRelayForCallback:
         case chatState.awaitingToken:
+        case chatState.awaitingTokenConnection:
         case chatState.disconnectingFromHost:
         case chatState.disconnectingFromRelayForHosting:
         case chatState.disconnectingFromRelayForConnection:
@@ -866,6 +961,8 @@ function start() {
                     connect(encodePeerId(relayID, addrs), relayProtocol, true);
                 } else {
                     var token = '';
+                    var a = 'a'.charCodeAt(0);
+                    var A = 'A'.charCodeAt(0);
 
                     for (var i = 0; i < 16; i++) {
                         var n = Math.round(Math.random() * 51);
@@ -873,8 +970,11 @@ function start() {
                         token += String.fromCharCode(n < 26 ? a + n : A + n - 26);
                     }
                     handler.token = token;
-                    handler.changeState(chatState.awaitingToken);
-                    connect(encodePeerId(relayID, addrs), callbackProtocol, true);
+                    handler.changeState(chatState.connectingToRelayForCallback);
+                    handler.callbackPeer = peerID;
+                    handler.callbackRelay = relayID;
+                    listen(callbackProtocol, true);
+                    connect(encodePeerId(relayID, addrs), relayProtocol, true);
                 }
             } else {
                 handler.changeState(chatState.connectingToHost);
@@ -885,7 +985,9 @@ function start() {
             break;
         case chatState.connectingToHost:  // abort connection
         case chatState.connectingToRelayForConnection:
+        case chatState.connectingToRelayForCallback:
         case chatState.awaitingToken:
+        case chatState.awaitingTokenConnection:
             handler.connection.abort = true;
             break;
         case chatState.connectedToHost: // disconnect
@@ -922,6 +1024,10 @@ function start() {
     };
     $('#showChats').onclick = evt=> handler.showHideChats(!document.body.classList.contains('showChats'));
     $('#relayForHost').onclick = evt=> handler.relayFor($('#relayRequestHost').value);
+    $('#showConnect').onclick = checkedPanelSelector;
+    $('#showHost').onclick = checkedPanelSelector;
+    $('#showRelay').onclick = checkedPanelSelector;
+    checkedPanelSelector();
 }
 
 window.onload = start;

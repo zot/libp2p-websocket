@@ -120,16 +120,93 @@ body.showGui #chatsBody {
 #relayPanel {
     display: none;
 }
+/*
 .active.peer #connectDiv,
 .active.host #hostDiv,
 .publicNAT #relayPanel {
     display: inherit;
+}
+*/
+#connectDiv,
+#hostDiv,
+#relayPanel {
+    display: none;
+}
+.showConnect #connectDiv,
+.showHost #hostDiv,
+.showRelay #relayPanel {
+    display: inherit;
+}
+#showConnect,
+label[for=showConnect],
+#showHost,
+label[for=showHost],
+#showRelay,
+label[for=showRelay],
+#mainGui,
+body.choiceLocked #panelSelector {
+    display: none;
+}
+body.choiceLocked #mainGui {
+    display: initial;
+}
+.locked-only,
+.relay-only,
+.host-only,
+body.publicNAT .private-only,
+body.privateNAT .public-only,
+body.choiceLocked .private-only,
+body.choiceLocked .public-only {
+    display: none;
+}
+.private-only,
+.public-only,
+body.host .host-only,
+body.relay .relay-only,
+body.choiceLocked .locked-only {
+    display: initial;
+}
+body.connected .disconnected-only {
+    display: none !important;
+}
+.publicNAT #showConnect,
+.publicNAT label[for=showConnect],
+.publicNAT #showHost,
+.publicNAT label[for=showHost],
+.publicNAT #showRelay
+.publicNAT label[for=showRelay] {
+    display: initial;
+}
+.publicNAT #showRelay,
+.publicNAT label[for=showRelay] {
+    display: initial;
+}
+.showGui #showConnect,
+.showGui label[for=showConnect],
+.showGui #showHost,
+.showGui label[for=showHost] {
+    display: initial;
+}
+#panelSelector {
+    margin-top: 2em;
+    text-align: center;
+    user-select: none;
+}
+body {
+    user-select: none;
+}
+#peerID {
+    user-select: all;
 }
 #connectStatus {
 	display: none;
 }
 .showChats #connectStatus {
 	display: initial;
+}
+#start {
+    display: flex;
+    flex-direction: column;
 }
 #userDiv {
 	display: flex;

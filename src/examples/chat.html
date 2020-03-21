@@ -38,6 +38,14 @@
                     <div id='awaitingPeer'>WAITING FOR PEER STATUS</div>
                 </div>
                 <div id='chatsBody'>
+                    <div id='panelSelector'>
+                        <input type="radio" id="showConnect" name="panelSelector">
+                        <label for="showConnect">Join a session</label>
+                        <input type="radio" id="showHost" name="panelSelector">
+                        <label for="showHost">Host a session</label>
+                        <input type="radio" id="showRelay" name="panelSelector">
+                        <label for="showRelay">Relay for a private peer</label>
+                    </div>
                     <div id='connectDiv'>
                         <hr>
                         <div class='field'>
@@ -49,44 +57,61 @@
                     </div>
                     <div id='hostDiv'>
                         <hr>
+                        <h1 class='host-only'>Give your connect string to people you want to invite</h1>
                         <div class='field'>
                             <button id='host'>Host</button>
                             &nbsp;
                             <span class='private-only'>&nbsp;Relay connect string:&nbsp;</span>
-                            <input id='hostingRelay' type='text' class='private-only' placeholder='You must use a relay because your connection is private'>
+                            <input class='private-only' id='hostingRelay' type='text' placeholder='You must use a relay because your connection is private'>
+                            <span class='locked-only'>Connect string:&nbsp;</span>
+                            <input class='locked-only' id='connectString' type='text' readonly='true'>
                         </div>
-                        <div class='field'>
-                            Connect string:&nbsp;
-                            <input id='connectString' type='text' readonly='true'>
-                        </div>
+                        <h1 class='private-only'>
+                            Your peer does not have public access so you must use a relay
+                            <ol>
+                                <li>Copy your peer ID and send it to someone who will relay for you</li>
+                                <li>Once they relay, they will send you the relay connect string</li>
+                                <li>Paste the relay connect string above and click Host</li>
+                            </ol>
+                        </h1>
                     </div>
                     <div id='relayPanel'>
                         <hr>
+                        <h1 class='relay-only disconnected-only'>Give your relay connect string to the private peer's owner</h1>
                         <div id='relayHosting'>
                             <div class='field'>
-                                <button id='relayForHost'>Relay for</button> <span>Host Peer: </span> <input id='relayRequestHost' type='text'>
-                            </div>
-                            <div class='field'>
-                                Relay connect string:&nbsp;
-                                <input id='relayConnectString' type='text' readonly='true'>
+                                <button id='relayForHost'>Relay</button>
+                                <span class='public-only'>&nbsp;Host Peer:&nbsp;</span>
+                                <input id='relayRequestHost' type='text' class='public-only' placeholder="'Paste the session host's peer ID here">
+                                <span class='locked-only disconnected-only'>&nbsp;Relay connect string:&nbsp;</span>
+                                <input class='locked-only disconnected-only' id='relayConnectString' type='text' readonly='true'>
                             </div>
                         </div>
+                        <h1 class='public-only'>
+                            <ol>
+                                <li>Paste the private peer's id above
+                                <li>Click Relay
+                                <li>Copy the relay connect string and send it to the private peer's owner
+                            </ol>
+                        </h1>
                     </div>
-                    <hr>
-                    <button id='showChats'>Show Chats</button>
-                    <div id='connectionPanel' class='panel'>
-                        Relaying Peers
-                        <div class='panel' id='relayingPeers'></div>
-                    </div>
-                    <div id='chatPanel'>
-                        <div id='userPanel'>
-                            <b>Users</b>
-                            <div id='users' class='panel'></div>
+                    <div id='mainGui'>
+                        <hr>
+                        <button id='showChats'>Show Chats</button>
+                        <div id='connectionPanel' class='panel'>
+                            Relaying Peers
+                            <div class='panel' id='relayingPeers'></div>
                         </div>
-                        <div id='messagePanel'>
-                            <b>Messages</b>
-                            <div id='conversation' class='panel'></div>
-                            <input id='send' type='text'>
+                        <div id='chatPanel'>
+                            <div id='userPanel'>
+                                <b>Users</b>
+                                <div id='users' class='panel'></div>
+                            </div>
+                            <div id='messagePanel'>
+                                <b>Messages</b>
+                                <div id='conversation' class='panel'></div>
+                                <input id='send' type='text'>
+                            </div>
                         </div>
                     </div>
                 </div>

@@ -41,7 +41,7 @@ messages, with the first byte of each message identifying the command.
  
 ```
   Listen:      [0][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
-  Stop:        [1][PROTOCOL: rest]            -- stop listening to PROTOCOL
+  Stop:        [1][PROTOCOL: rest] -- stop listening to PROTOCOL
   Close:       [2][ID: 8]                     -- close a stream
   Data:        [3][ID: 8][data: rest]         -- write data to stream
   Connect:     [4][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
@@ -203,7 +203,7 @@ type protocolHandler interface {
 	CreateClient() *client
 	StartClient(c *client, init func(public bool))
 	Listen(c *client, protocol string, frames bool)
-	Stop(c *client, protocol string)
+	Stop(c *client, protocol string, retainConnections bool)
 	Close(c *client, conID uint64)
 	Data(c *client, conID uint64, data []byte)
 	Connect(c *client, protocol string, peerID string, frames bool, relay bool)
@@ -359,6 +359,7 @@ func (c *connection) writeData(r *relay, data []byte) {
 }
 
 func (c *connection) close(then func()) {
+	fmt.Println("CONNECTION CLOSING")
 	svc(c, func() {
 		if c.stream != nil {
 			c.stream.Close()
@@ -450,8 +451,8 @@ func (c *client) readWebsocket(r *relay) {
 							r.Listen(c, string(body[1:]), body[0] != 0)
 						}
 					case cmsgStop:
-						if c.assert(len(body) > 0, "Bad message format for cmsgStop") {
-							r.Stop(c, string(body))
+						if c.assert(len(body) > 1, "Bad message format for cmsgStop") {
+							r.Stop(c, string(body[1:]), body[0] != 0)
 						}
 					case cmsgClose:
 						if c.assert(len(body) == 8, "Bad message format for cmsgClose") {
@@ -707,8 +708,8 @@ func (r *relay) Listen(c *client, protocol string, frames bool) {
 	r.handler.Listen(c, protocol, frames)
 }
 
-func (r *relay) Stop(c *client, protocol string) {
-	r.handler.Stop(c, protocol)
+func (r *relay) Stop(c *client, protocol string, retainConnections bool) {
+	r.handler.Stop(c, protocol, retainConnections)
 }
 
 func (r *relay) Close(c *client, conID uint64) {

@@ -154,12 +154,13 @@ class ChatHandler extends CommandHandler {
             console.log('Peer already started');
         } else {
             console.log('Starting peer...');
-            libp2p.start('');
+            libp2p.start(localStorage.getItem('peerKey') || '');
         }
     }
     // P2P API
     ident(status, peerID, addresses, peerKey) {
         this.retrieveInfo();
+        localStorage.setItem('peerKey', peerKey);
         $('#natStatus').textContent = status;
         $('#peerID').textContent = peerID;
         console.log('IDENT: ', peerID, ' ', status);

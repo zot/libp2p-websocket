@@ -207,6 +207,7 @@ type protocolHandler interface {
 	Connect(c *client, protocol string, peerID string, frames bool, relay bool)
 	CleanupClosed(c *connection)
 	AddressesJson() string
+	PeerKey() string
 }
 
 type chanSvc interface {
@@ -809,7 +810,7 @@ func (r *relay) runProtocol(con *websocket.Conn) {
 		}()
 		// start the client, send ident message when ready
 		r.StartClient(client, func(public bool) {
-			client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson(), "")
+			client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson(), r.handler.PeerKey())
 			runSvc(client)
 			client.readWebsocket(r)
 		})

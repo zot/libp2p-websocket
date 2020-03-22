@@ -409,6 +409,10 @@ func (r *libp2pRelay) AddressesJson() string {
 	return string(buf.Bytes())
 }
 
+func (r *libp2pRelay) PeerKey() string {
+	return peerKey
+}
+
 func (r *libp2pRelay) setNATStatus(status autonat.NATStatus) {
 	r.natStatus = status
 	for _, f := range r.natActions {
@@ -575,8 +579,8 @@ func initp2p() {
 	key := myHost.Peerstore().PrivKey(myHost.ID())
 	keyBytes, err := crypto.MarshalPrivateKey(key)
 	checkErr(err)
-	keyString := crypto.ConfigEncodeKey(keyBytes)
-	fmt.Printf("host private %s key: %s\n", reflect.TypeOf(key), keyString)
+	peerKey = crypto.ConfigEncodeKey(keyBytes)
+	fmt.Printf("host private %s key: %s\n", reflect.TypeOf(key), peerKey)
 
 	autonatSvc.NewAutoNATService(context.Background(), myHost)
 

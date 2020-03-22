@@ -690,7 +690,7 @@ func main() {
 		fakeNatStatus = "public"
 	}
 	fmt.Printf("Listening on port %v\n", port)
-	http.HandleFunc("/ipfswsrelay", centralRelay.handleConnection())
+	http.HandleFunc("/libp2p", centralRelay.handleConnection())
 	if len(fileList) > 0 {
 		for _, dir := range fileList {
 			fmt.Println("File dir: ", dir)

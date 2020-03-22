@@ -41,7 +41,7 @@ Usage of libp2p-websocket:
         port to listen on (default 8888)
 ```
 
-# libp2p-websocket runs a websocket server on /ws/control
+# libp2p-websocket runs a websocket server on /libp2p
 This allows a browser to control the relay using a very simple binary protocol.
 When a connection closes, it cleans up all of its child connections.
 The client and server exchange these command messages, with the first byte of each message identifying the command.

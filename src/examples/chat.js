@@ -899,7 +899,7 @@ function start() {
     if (document.port) {
         url += ":" + document.port;
     }
-    startProtocol(url + "ipfswsrelay", new LoggingHandler(trackingHandler));
+    startProtocol(url + "libp2p", new LoggingHandler(trackingHandler));
     $('#host').onclick = ()=> {
         switch (handler.state) {
         case chatState.disconnected: // start hosting

@@ -53,6 +53,7 @@ var {
     relayErrors,
     connectionError,
     getString,
+    startProtocol,
 } = libp2p;
 
 /// simplementation of jQuery
@@ -147,7 +148,17 @@ class ChatHandler extends CommandHandler {
         this.protocols.add(prot);
     }
     // P2P API
-    ident(status, peerID, addresses) {
+    hello(started) {
+        console.log('RECEIVED HELLO');
+        if (started) {
+            console.log('Peer already started');
+        } else {
+            console.log('Starting peer...');
+            libp2p.start('');
+        }
+    }
+    // P2P API
+    ident(status, peerID, addresses, peerKey) {
         this.retrieveInfo();
         $('#natStatus').textContent = status;
         $('#peerID').textContent = peerID;
@@ -868,6 +879,10 @@ function checkedPanelSelector(evt) {
 function start() {
     var search = document.location.search.match(/\?(.*)/);
     var params = {};
+    var url = "ws://"+document.location.host+"/";
+    var connections = {};
+    var handler = new ChatHandler(connections);
+    var trackingHandler = new TrackingHandler(handler, connections);
 
     console.log("START");
     if (search) {
@@ -878,37 +893,12 @@ function start() {
         }
         console.log('params:', JSON.stringify(params));
     }
-    if (params.start) {
-        // GET KEY FROM STORAGE AND STUFF IT INTO REQUEST BODY
-        console.log(new URL('/ipfswsrelay/start', document.location)+"");
-        fetch(new URL('/ipfswsrelay/start', document.location)+"").then(resp=> {
-            if (resp.ok) {
-                continueStarting(params);
-            } else {
-                errorStarting(resp);
-            }
-        });
-    } else {
-        continueStarting();
-    }
-}
-
-function errorStarting(resp) {
-    alert('Error starting peer: '+resp.statusText);
-}
-
-function continueStarting(params) {
-    var url = "ws://"+document.location.host+"/";
-    var connections = {};
-    var handler = new ChatHandler(connections);
-    var trackingHandler = new TrackingHandler(handler, connections);
-
     handler.trackingHandler = trackingHandler;
     console.log('handler: ', handler);
     if (document.port) {
         url += ":" + document.port;
     }
-    libp2p.start(url + "ipfswsrelay", new LoggingHandler(trackingHandler));
+    startProtocol(url + "ipfswsrelay", new LoggingHandler(trackingHandler));
     $('#host').onclick = ()=> {
         switch (handler.state) {
         case chatState.disconnected: // start hosting

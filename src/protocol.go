@@ -40,32 +40,28 @@ messages, with the first byte of each message identifying the command.
 # CLIENT-TO-SERVER MESSAGES
  
 ```
+  Start:       [0][KEY: str] -- start peer with optional peer key
   Listen:      [0][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
   Stop:        [1][PROTOCOL: rest] -- stop listening to PROTOCOL
   Close:       [2][ID: 8]                     -- close a stream
   Data:        [3][ID: 8][data: rest]         -- write data to stream
   Connect:     [4][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
-  Dsc Listen:  [5][FRAMES: 1][PROTOCOL: rest] -- host a protocol using discovery
-  Dsc Connect: [6][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- request a connection to a peer potentially requesting a callback
-  Start:       [7][PEERKEY: STR] -- start peer with optional private key
 ```
 
 # SERVER-TO-CLIENT MESSAGES
 
 ```
-  Identify:                [0][PUBLIC: 1][PEERID: str][KEY: rest] -- successful initialization
-  Listener Connection:     [1][ID: 8][PEERID: str][PROTOCOL: rest] -- new listener connection with id ID
-  Connection Closed:       [2][ID: 8][REASON: rest]            -- connection ID closed
-  Data:                    [3][ID: 8][data: rest]              -- receive data from stream with id ID
-  Listen Refused:          [4][PROTOCOL: rest]                 -- could not listen on PROTOCOL
-  Listener Closed:         [5][PROTOCOL: rest]                 -- could not listen on PROTOCOL
-  Peer Connection:         [6][ID: 8][PEERID: str][PROTOCOL: rest] -- connected to a peer with id ID
-  Peer Connection Refused: [7][PEERID: str][PROTOCOL: str][ERROR: rest] -- connection to peer PEERID refused
-  Protocol Error:          [8][MSG: rest]                      -- error in the protocol
-  Dsc Host Connect:        [9][ID: 8][PEERID: str][PROTOCOL: rest] -- connection from a discovery peer
-  Dsc Peer Connect:        [10][ID: 8][PEERID: str][PROTOCOL: rest] -- connected to a discovery host
-  Listening:               [11][PROTOCOL: rest]                -- confirmation that listening has started
-  Dsc Awaiting Callback:   [12][PROTOCOL: rest]                -- confirmation that peer is waiting for a callback
+  Hello:                   [0][STARTED: 1] -- hello message indicates whether the peer needs starting
+  Identify:                [1][PUBLIC: 1][PEERID: str][ADDRESSES: str][KEY: rest] -- successful initialization
+  Listener Connection:     [2][ID: 8][PEERID: str][PROTOCOL: rest] -- new listener connection with id ID
+  Connection Closed:       [3][ID: 8][REASON: rest]            -- connection ID closed
+  Data:                    [4][ID: 8][data: rest]              -- receive data from stream with id ID
+  Listen Refused:          [5][PROTOCOL: rest]                 -- could not listen on PROTOCOL
+  Listener Closed:         [6][PROTOCOL: rest]                 -- could not listen on PROTOCOL
+  Peer Connection:         [7][ID: 8][PEERID: str][PROTOCOL: rest] -- connected to a peer with id ID
+  Peer Connection Refused: [8][PEERID: str][PROTOCOL: str][ERROR: rest] -- connection to peer PEERID refused
+  Protocol Error:          [9][MSG: rest]                      -- error in the protocol
+  Listening:               [10][PROTOCOL: rest]                -- confirmation that listening has started
 ```
 
 This code uses quite a few goroutines and channels. Here is the pattern:
@@ -97,14 +93,16 @@ import (
 
 type messageType byte
 const (
-	cmsgListen messageType = iota
+	cmsgStart messageType = iota
+	cmsgListen
 	cmsgStop
 	cmsgClose
 	cmsgData
 	cmsgConnect
-	cmsgDscListen
-	cmsgDscConnect
-	smsgIdent = iota - cmsgDscConnect - 1 // restart at 0
+)
+const (
+	smsgHello messageType = iota
+	smsgIdent
 	smsgNewConnection
 	smsgConnectionClosed
 	smsgData
@@ -113,14 +111,11 @@ const (
 	smsgPeerConnection
 	smsgPeerConnectionRefused
 	smsgError
-	smsgDscHostConnect
-	smsgDscPeerConnect
 	smsgListening
-	smsgDscAwaitingCallback
 )
 
-var cmsgNames = [...]string{"cmsgListen", "cmsgStop", "cmsgClose", "cmsgData", "cmsgConnect", "cmsgDscListen", "cmsgDscConnect"}
-var smsgNames = [...]string{"smsgIdent", "smsgNewConnection", "smsgConnectionClosed", "smsgData", "smsgListenRefused", "smsgListenerClosed", "smsgPeerConnection", "smsgPeerConnectionRefused", "smsgError", "smsgDscHostConnect", "smsgDscPeerConnect", "smsgListening", "smsgDscAwaitingCallback"}
+var cmsgNames = [...]string{"cmsgStart", "cmsgListen", "cmsgStop", "cmsgClose", "cmsgData", "cmsgConnect"}
+var smsgNames = [...]string{"smsgHello", "smsgIdent", "smsgNewConnection", "smsgConnectionClosed", "smsgData", "smsgListenRefused", "smsgListenerClosed", "smsgPeerConnection", "smsgPeerConnectionRefused", "smsgError", "smsgListening"}
 
 const (
 	maxMessageSize = 65536 // Maximum websocket message size
@@ -200,6 +195,8 @@ type relay struct {
 }
 
 type protocolHandler interface {
+	Started() bool
+	Start(peerKey string)
 	HasConnection(c *client, id uint64) bool
 	CreateClient() *client
 	StartClient(c *client, init func(public bool))
@@ -212,28 +209,22 @@ type protocolHandler interface {
 	AddressesJson() string
 }
 
-/*
- * A callback service that uses the following advertisement strings:
- *   libp2p-connection-direct-PROTOCOL: this peer is hosting PROTOCOL and can receive direct connections
- *   libp2p-connection-indirect-PROTOCOL: this peer is hosting PROTOCOL but can only make outgoing connections. It is expected to monitor connection requests and also use the circuit relay
- *   libp2p-connection-request-PROTOCOL: this peer is requesting a connection for PROTOCOL
- */
-type discoveryHandler interface {
-	protocolHandler
-	DiscoveryListen(c *client, frames bool, protocol string)
-	DiscoveryConnect(c *client, frames bool, protocol string, peerid string)
-}
-
 type chanSvc interface {
 	getSvcChannel() chan func()
 }
 
 func (t messageType) clientName() string {
-	return cmsgNames[t]
+	if int(t) < len(cmsgNames) {
+		return cmsgNames[t]
+	}
+	return fmt.Sprint("UNKNOWN SERVER MESSAGE: %d", byte(t))
 }
 
 func (t messageType) serverName() string {
-	return smsgNames[t]
+	if int(t) < len(smsgNames) {
+		return smsgNames[t]
+	}
+	return fmt.Sprint("UNKNOWN SERVER MESSAGE: %d", byte(t))
 }
 
 func svcSync(s chanSvc, code func() interface{}) interface{} {
@@ -472,15 +463,6 @@ func (c *client) readWebsocket(r *relay) {
 							fmt.Println("Prot:"+prot+", Peer id: "+peerid+", Relay: "+boolString(relay))
 							r.Connect(c, prot, peerid, frames, relay)
 						}
-					case cmsgDscListen:
-						if c.assert(len(body) > 4, "Bad message formag for cmsgDscListen") {
-							r.DiscoveryListen(c, body[0] != 0, string(body[1:]))
-						}
-					case cmsgDscConnect:
-						if c.assert(len(body) > 4, "Bad message formag for cmsgDscConnect") {
-							prot, peerid := getString(body[1:])
-							r.DiscoveryConnect(c, body[0] != 0, string(prot), string(peerid))
-						}
 					}
 				} else if err != nil {
 					log.Printf("error: %v\n", err)
@@ -697,6 +679,14 @@ func (r *relay) StartClient(c *client, init func(public bool)) {
 	r.handler.StartClient(c, init)
 }
 
+func (r *relay) Started() bool {
+	return r.handler.Started()
+}
+
+func (r *relay) Start(pk string) {
+	r.handler.Start(pk)
+}
+
 func (r *relay) HasConnection(c *client, id uint64) bool {
 	return r.handler.HasConnection(c, id)
 }
@@ -725,24 +715,6 @@ func (r *relay) Connect(c *client, protocol string, peerID string, frames bool, 
 	r.handler.Connect(c, protocol, peerID, frames, relay)
 }
 
-func (r *relay) DiscoveryListen(c *client, frames bool, prot string) {
-	dsc, ok := r.handler.(discoveryHandler)
-	if !ok {
-		c.writePackedMessage(smsgError, "Relay does not support discovery")
-	} else {
-		dsc.DiscoveryListen(c, frames, prot)
-	}
-}
-
-func (r *relay) DiscoveryConnect(c *client, frames bool, prot string, peerid string) {
-	dsc, ok := r.handler.(discoveryHandler)
-	if !ok {
-		c.writePackedMessage(smsgError, "Relay does not support discovery")
-	} else {
-		dsc.DiscoveryConnect(c, frames, prot, peerid)
-	}
-}
-
 func (r *relay) init(handler protocolHandler) {
 	r.clients = make(map[*websocket.Conn]*client)
 	r.managementChan = make(chan func())
@@ -755,6 +727,7 @@ func (r *relay) getSvcChannel() chan func() {
 
 func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, req *http.Request) {
+		fmt.Println("GOT CONNECTION, STARTING WEB SOCKET")
 		upgrader := websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -763,42 +736,84 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 		if err != nil {
 			log.Printf("error: %v", err)
 		} else {
-			svc(r, func() {
-				client := r.CreateClient()
-				client.control = con
-				r.clients[con] = client
-				// start websocket ping/pong keepalive
-				con.SetReadDeadline(time.Now().Add(pongWait))
-				con.SetPongHandler(func(string) error { con.SetReadDeadline(time.Now().Add(pongWait)); return nil })
-				go func() {
-					done := new(atomicBoolean)
-					client.ticker = time.NewTicker(pingPeriod)
-					defer client.ticker.Stop()
-					for !done.Get() {
-						select {
-						case _, ok := <- client.ticker.C:
-							if ok {
-								svc(client, func() {
-									if err := con.WriteMessage(websocket.PingMessage, nil); err != nil {
-										done.Set(true)
-										client.close()
-									}
-								})
-							} else {
-								break
-							}
-						}
+			started := r.Started()
+			err := con.WriteMessage(websocket.BinaryMessage, pack(smsgHello, started))
+			if err != nil {
+				log.Printf("Error writing initial message: %v\n", err)
+				con.Close()
+				return
+			}
+			if !started {
+				for {
+					_, data, err := con.ReadMessage()
+					if _, ok := err.(net.Error); ok && err.(net.Error).Timeout() {
+						fmt.Println("CONTINUING WEB SOCKET READ AFTER TIMEOUT")
+						err = nil
+						continue
 					}
-				}()
-				// start the client, send ident message when ready
-				r.StartClient(client, func(public bool) {
-					client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson())
-					runSvc(client)
-					client.readWebsocket(r)
-				})
-			})
+					if err != nil && errors.Is(err, syscall.ETIMEDOUT) {
+						fmt.Println("CONTINUING WEB SOCKET READ AFTER ETIMEDOUT")
+						err = nil
+						continue
+					}
+					if err == nil {
+						fmt.Printf("@@@ READ MESSAGE %s: %X\n", messageType(data[0]).clientName(), data[1:])
+					} else {
+						fmt.Println("ERROR READING WEB SOCKET", err)
+						con.Close()
+					}
+					if messageType(data[0]) == cmsgStart {
+						r.Start(string(data[1:]))
+						r.runProtocol(con)
+					} else {
+						fmt.Println("ERROR, EXPECTED START MESSAGE BUT GOT", messageType(data[0]).clientName)
+						con.Close()
+					}
+					// only continue loop with continue statement
+					return
+				}
+			} else {
+				r.runProtocol(con)
+			}
 		}
 	}
+}
+
+func (r *relay) runProtocol(con *websocket.Conn) {
+	svc(r, func() {
+		client := r.CreateClient()
+		client.control = con
+		r.clients[con] = client
+		// start websocket ping/pong keepalive
+		con.SetReadDeadline(time.Now().Add(pongWait))
+		con.SetPongHandler(func(string) error { con.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+		go func() {
+			done := new(atomicBoolean)
+			client.ticker = time.NewTicker(pingPeriod)
+			defer client.ticker.Stop()
+			for !done.Get() {
+				select {
+				case _, ok := <- client.ticker.C:
+					if ok {
+						svc(client, func() {
+							if err := con.WriteMessage(websocket.PingMessage, nil); err != nil {
+								done.Set(true)
+								client.close()
+							}
+						})
+					} else {
+						break
+					}
+				}
+			}
+		}()
+		// start the client, send ident message when ready
+		r.StartClient(client, func(public bool) {
+			client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson(), "")
+			runSvc(client)
+			client.readWebsocket(r)
+		})
+	})
 }
 
 func newBuf(len int) *bytes.Buffer {

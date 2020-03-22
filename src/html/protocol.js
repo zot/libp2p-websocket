@@ -68,29 +68,26 @@ const natStatus = Object.freeze({
 });
 
 const cmsg = Object.freeze({
-    listen: 0,
-    stop: 1,
-    close: 2,
-    data: 3,
-    connect: 4,
-    discoveryListen: 5,
-    discoveryConnect: 6,
+    start: 0,
+    listen: 1,
+    stop: 2,
+    close: 3,
+    data: 4,
+    connect: 5,
 });
 
 const smsg = Object.freeze({
-    ident: 0,
-    listenerConnection: 1,
-    connectionClosed: 2,
-    data: 3,
-    listenRefused: 4,
-    listenerClosed: 5,
-    peerConnection: 6,
-    peerConnectionRefused: 7,
-    error: 8,
-    discoveryHostConnect: 9,
-    discoveryPeerConnect: 10,
-    listening: 11,
-    discoveryAwaitingCallback: 12,
+    hello: 0,
+    ident: 1,
+    listenerConnection: 2,
+    connectionClosed: 3,
+    data: 4,
+    listenRefused: 5,
+    listenerClosed: 6,
+    peerConnection: 7,
+    peerConnectionRefused: 8,
+    error: 9,
+    listening: 10,
 });
 
 var ws;
@@ -145,6 +142,10 @@ function close(conID, cb) {
     ws.send(buf, cb);
 }
 
+function start(peerKey) {
+    ws.send(Uint8Array.from([cmsg.start, ...utfEncoder.encode(peerKey || '')]));
+}
+
 function listen(protocol, frames) {
     ws.send(Uint8Array.from([cmsg.listen, frames ? 1 : 0, ...utfEncoder.encode(protocol)]));
 }
@@ -176,7 +177,8 @@ function discoveryConnect(peerID, prot, frames) {
 
 // methods mimic the parameter order of the protocol
 class BlankHandler {
-    ident(status, peerID, addresses) {}
+    hello(running) {}
+    ident(status, peerID, addresses, peerKey) {}
     listenerConnection(conID, peerID, prot) {}
     connectionClosed(conID, msg) {}
     data(conID, data, obj) {}  // obj is optionally a JSON object
@@ -195,7 +197,10 @@ class DelegatingHandler {
     constructor(delegate) {
         this.delegate = delegate;
     }
-    ident(status, peerID, addresses) {
+    hello(running) {
+        tryDelegate(this.delegate, 'hello', arguments);
+    }
+    ident(status, peerID, addresses, peerKey) {
         tryDelegate(this.delegate, 'ident', arguments);
     }
     listenerConnection(conID, peerID, prot) {
@@ -330,9 +335,9 @@ class LoggingHandler extends DelegatingHandler {
     constructor(delegate) {
         super(delegate);
     }
-    ident(status, peerID, addresses) {
+    ident(status, peerID, addresses, peerKey) {
         receivedMessageArgs('ident', arguments);
-        super.ident(status, peerID, addresses);
+        super.ident(status, peerID, addresses, peerKey);
     }
     listenerConnection(conID, peerID, prot) {
         receivedMessageArgs('listenerConnection', arguments);
@@ -427,10 +432,10 @@ class TrackingHandler extends DelegatingHandler {
         connections.listeningTo = new Set();
         //connections.awaitingCallbacks = new Set();
     }
-    ident(status, peerID, addresses) {
+    ident(status, peerID, addresses, peerKey) {
         this.connections.peerID = peerID;
         this.connections.natStatus = status;
-        super.ident(status, peerID, addresses);
+        super.ident(status, peerID, addresses, peerKey);
     }
     listenerConnection(conID, peerID, prot) {
         var con = new ConnectionInfo(conID, peerID, prot, true);
@@ -876,7 +881,7 @@ function cleanupConnections(connections, conID) {
     connections.infoByConID.delete(conID);
 }
 
-function start(urlStr, handler) {
+function startProtocol(urlStr, handler) {
     ws = new WebSocket(urlStr);
     ws.onopen = function open() {
         console.log("OPENED CONNECTION, WAITING FOR PEER ID AND NAT STATUS...");
@@ -891,11 +896,17 @@ function start(urlStr, handler) {
             console.log("MESSAGE: [", data.join(", "), "]");
             console.log("TYPE: ", enumFor(smsg, data[0]));
             switch (data[0]) {
+            case smsg.hello: {
+                handler.hello(data[1] != 0);
+                break;
+            }
             case smsg.ident: {
                 var publicPeer = data[1]
                 var peerID = getCountedString(dv, 2);
-                var addresses = JSON.parse(getString(data.slice(4 + peerID.length)));
-                handler.ident(publicPeer ? natStatus.public : natStatus.private, peerID, addresses);
+                var addressesStr = getCountedString(dv, 4 + peerID.length);
+                var addresses = JSON.parse(addressesStr);
+                var peerKey = getString(data.slice(6 + peerID.length + addressesStr.length));
+                handler.ident(publicPeer ? natStatus.public : natStatus.private, peerID, addresses, peerKey);
                 break;
             }
             case smsg.listenerConnection: {
@@ -1072,6 +1083,7 @@ function decode_ascii85(a) {
 }
 
 export default {
+    startProtocol,
     start,
     BlankHandler,
     CommandHandler,

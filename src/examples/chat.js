@@ -866,17 +866,11 @@ function checkedPanelSelector(evt) {
 }
 
 function start() {
-    console.log("START");
-    var url = "ws://"+document.location.host+"/";
-    var connections = {};
-    var handler = new ChatHandler(connections);
-    var trackingHandler = new TrackingHandler(handler, connections);
     var search = document.location.search.match(/\?(.*)/);
-    var params = null;
+    var params = {};
 
-    handler.trackingHandler = trackingHandler;
+    console.log("START");
     if (search) {
-        params = {};
         for (var param of search[1].split('&')) {
             var [k, v] = param.split('=');
 
@@ -884,6 +878,32 @@ function start() {
         }
         console.log('params:', JSON.stringify(params));
     }
+    if (params.start) {
+        // GET KEY FROM STORAGE AND STUFF IT INTO REQUEST BODY
+        console.log(new URL('/ipfswsrelay/start', document.location)+"");
+        fetch(new URL('/ipfswsrelay/start', document.location)+"").then(resp=> {
+            if (resp.ok) {
+                continueStarting(params);
+            } else {
+                errorStarting(resp);
+            }
+        });
+    } else {
+        continueStarting();
+    }
+}
+
+function errorStarting(resp) {
+    alert('Error starting peer: '+resp.statusText);
+}
+
+function continueStarting(params) {
+    var url = "ws://"+document.location.host+"/";
+    var connections = {};
+    var handler = new ChatHandler(connections);
+    var trackingHandler = new TrackingHandler(handler, connections);
+
+    handler.trackingHandler = trackingHandler;
     console.log('handler: ', handler);
     if (document.port) {
         url += ":" + document.port;

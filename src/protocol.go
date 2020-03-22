@@ -47,12 +47,13 @@ messages, with the first byte of each message identifying the command.
   Connect:     [4][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
   Dsc Listen:  [5][FRAMES: 1][PROTOCOL: rest] -- host a protocol using discovery
   Dsc Connect: [6][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- request a connection to a peer potentially requesting a callback
+  Start:       [7][PEERKEY: STR] -- start peer with optional private key
 ```
 
 # SERVER-TO-CLIENT MESSAGES
 
 ```
-  Identify:                [0][PUBLIC: 1][PEERID: str]         -- successful initialization
+  Identify:                [0][PUBLIC: 1][PEERID: str][KEY: rest] -- successful initialization
   Listener Connection:     [1][ID: 8][PEERID: str][PROTOCOL: rest] -- new listener connection with id ID
   Connection Closed:       [2][ID: 8][REASON: rest]            -- connection ID closed
   Data:                    [3][ID: 8][data: rest]              -- receive data from stream with id ID
@@ -759,8 +760,6 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 			WriteBufferSize: 1024,
 		}
 		con, err := upgrader.Upgrade(w, req, nil)
-		//con.SetReadDeadline(time.Unix(0, 0))
-		//con.SetWriteDeadline(time.Unix(0, 0))
 		if err != nil {
 			log.Printf("error: %v", err)
 		} else {

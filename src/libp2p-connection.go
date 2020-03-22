@@ -125,6 +125,8 @@ type listener struct {
 	closed bool
 }
 
+var centralRelay *libp2pRelay
+var starting bool
 var logger = goLog.Logger("p2pmud")
 var peerKey string
 var listenAddresses addrList
@@ -815,7 +817,8 @@ func checkErr(err error) {
 	}
 }
 
-func initp2p(relay *libp2pRelay) {
+func initp2p() {
+	starting = true
 	goLog.SetAllLoggers(logging.WARNING)
 	goLog.SetLogLevel("rendezvous", "info")
 	ctx := context.Background()
@@ -853,45 +856,45 @@ func initp2p(relay *libp2pRelay) {
 	checkErr(err)
 	logger.Info("Host created. We are:", myHost.ID())
 	logger.Info(myHost.Addrs())
-	relay.peerID = myHost.ID().Pretty()
-	relay.host = myHost
+	centralRelay.peerID = myHost.ID().Pretty()
+	centralRelay.host = myHost
 
 	if fakeNatStatus == "public" {
-		relay.setNATStatus(autonat.NATStatusPublic)
+		centralRelay.setNATStatus(autonat.NATStatusPublic)
 	} else if fakeNatStatus == "private" {
-		relay.setNATStatus(autonat.NATStatusPrivate)
+		centralRelay.setNATStatus(autonat.NATStatusPrivate)
 	} else {
 		/// MONITOR NAT STATUS
 		fmt.Println("Creating autonat")
 		//an := autonat.NewAutoNAT(ctx, myHost, nil)
 		an := autonat.NewAutoNAT(context.Background(), myHost, nil)
-		relay.natStatus = autonat.NATStatusUnknown
+		centralRelay.natStatus = autonat.NATStatusUnknown
 		go func() {
 			peeped := false
 			for {
 				status := an.Status()
-				svcSync(relay, func() interface{} {
-					if status != relay.natStatus || !peeped {
+				svcSync(centralRelay, func() interface{} {
+					if status != centralRelay.natStatus || !peeped {
 						switch status {
 						case autonat.NATStatusUnknown:
 							fmt.Println("@@@ NAT status UNKNOWN")
 							addr, err := an.PublicAddr()
 							if err == nil {
 								fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
-								relay.printAddresses()
+								centralRelay.printAddresses()
 							}
 						case autonat.NATStatusPublic:
 							fmt.Println("@@@ NAT status PUBLIC")
 							addr, err := an.PublicAddr()
 							if err == nil {
 								fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
-								relay.printAddresses()
+								centralRelay.printAddresses()
 							}
 						case autonat.NATStatusPrivate:
 							fmt.Println("@@@ NAT status PRIVATE")
 						}
 						if status != autonat.NATStatusUnknown {
-							relay.setNATStatus(status)
+							centralRelay.setNATStatus(status)
 						}
 					}
 					return nil
@@ -948,29 +951,29 @@ func initp2p(relay *libp2pRelay) {
 	// We use a rendezvous point "meet me here" to announce our location.
 	// This is like telling your friends to meet you at the Eiffel Tower.
 	logger.Info("Announcing ourselves...")
-	//relay.discovery = discovery.NewRoutingDiscovery(kademliaDHT)
-//	relay.discovery = discovery.NewRoutingDiscovery(kademliaDHT)
-	//err := myDHT.PutValue(context.Background(), "p2pmud", []byte(relay.host.ID().Pretty()))
+	//centralRelay.discovery = discovery.NewRoutingDiscovery(kademliaDHT)
+//	centralRelay.discovery = discovery.NewRoutingDiscovery(kademliaDHT)
+	//err := myDHT.PutValue(context.Background(), "p2pmud", []byte(centralRelay.host.ID().Pretty()))
 	//checkErr(err)
 	//mudChan := myDHT.Search(context.Background(), "p2pmud")
-	//discovery.Advertise(ctx, relay.discovery, rendezvousString, discovery.TTL(1 * time.Minute))
+	//discovery.Advertise(ctx, centralRelay.discovery, rendezvousString, discovery.TTL(1 * time.Minute))
 	//logger.Debug("Successfully announced!")
 
 	// Now, look for others who have announced
 	// This is like your friend telling you the location to meet you.
 	//logger.Debug("Searching for other peers...")
-	//peerChan, err := relay.discovery.FindPeers(ctx, config.RendezvousString)
-	//_, err = relay.discovery.FindPeers(ctx, rendezvousString)
+	//peerChan, err := centralRelay.discovery.FindPeers(ctx, config.RendezvousString)
+	//_, err = centralRelay.discovery.FindPeers(ctx, rendezvousString)
 	//checkErr(err)
 /*
-	peerChan, err := relay.discovery.FindPeers(ctx, rendezvousString) // request just to get in touch with peers
+	peerChan, err := centralRelay.discovery.FindPeers(ctx, rendezvousString) // request just to get in touch with peers
 	if err != nil {
 		panic(err)
 	}
 	go func() {
 		fmt.Println("SEARCHING FOR PEERS...")
 		for peer := range peerChan {
-			if peer.ID == relay.host.ID() {
+			if peer.ID == centralRelay.host.ID() {
 				continue
 			}
 			logger.Debug("Found peer:", peer)
@@ -978,6 +981,10 @@ func initp2p(relay *libp2pRelay) {
 		fmt.Println("FINISHED SEARCHING FOR PEERS")
 	}()
 */
+	centralRelay.printAddresses()
+	fmt.Println("FINISHED INITIALIZING P2P, CREATING RELAY")
+	runSvc(centralRelay)
+	fmt.Printf("Peer id: %v\n", centralRelay.peerID)
 }
 
 func (fl *fileList) String() string {
@@ -1026,9 +1033,11 @@ func StringsToAddrs(addrStrings []string) (maddrs []multiaddr.Multiaddr, err err
 }
 
 func main() {
+	starting = false
+	startp2p := false
 	log.SetFlags(log.Lshortfile)
 	browse := ""
-	relay := createLibp2pRelay()
+	centralRelay = createLibp2pRelay()
 	addr := "localhost"
 	port := 8888
 	noBootstrap := false
@@ -1046,6 +1055,7 @@ func main() {
 	flag.StringVar(&browse, "browse", "", "Browse a URL")
 	flag.BoolVar(&fakeNATPrivate, "fakenatprivate", false, "pretend nat is private")
 	flag.BoolVar(&fakeNATPublic, "fakenatpublic", false, "pretend nat is publc")
+	flag.BoolVar(&startp2p, "start", false, "start peer (do not wait for web client to start it)")
 	flag.Parse()
 	if len(bootstrapArg) > 0 {
 		bootstrapPeers = bootstrapArg
@@ -1057,12 +1067,22 @@ func main() {
 	} else if fakeNATPublic {
 		fakeNatStatus = "public"
 	}
-	initp2p(relay)
-	relay.printAddresses()
-	fmt.Println("FINISHED INITIALIZING P2P, CREATING RELAY")
-	runSvc(relay)
-	fmt.Printf("Listening on port %v\nPeer id: %v\n", port, relay.peerID)
-	http.HandleFunc("/ipfswsrelay", relay.handleConnection())
+	if startp2p {
+		initp2p()
+	}
+	fmt.Printf("Listening on port %v\n", port)
+	http.HandleFunc("/ipfswsrelay/start", func(w http.ResponseWriter, req *http.Request) {
+		if !startp2p && !starting {
+			fmt.Println("STARTING RELAY...")
+			/// GRAB KEY FROM REQUEST BODY
+			initp2p()
+			fmt.Println("STARTED")
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	})
+	http.HandleFunc("/ipfswsrelay", centralRelay.handleConnection())
 	if len(fileList) > 0 {
 		for _, dir := range fileList {
 			fmt.Println("File dir: ", dir)

@@ -50,11 +50,11 @@ The client and server exchange these command messages, with the first byte of ea
  
 ```
   Start:       [0][KEY: str] -- start peer with optional peer key
-  Listen:      [0][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
-  Stop:        [1][PROTOCOL: rest] -- stop listening to PROTOCOL
-  Close:       [2][ID: 8]                     -- close a stream
-  Data:        [3][ID: 8][data: rest]         -- write data to stream
-  Connect:     [4][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
+  Listen:      [1][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
+  Stop:        [2][PROTOCOL: rest] -- stop listening to PROTOCOL
+  Close:       [3][ID: 8]                     -- close a stream
+  Data:        [4][ID: 8][data: rest]         -- write data to stream
+  Connect:     [5][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
 ```
 
 # SERVER-TO-CLIENT MESSAGES

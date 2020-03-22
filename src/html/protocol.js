@@ -28,30 +28,28 @@
 # CLIENT-TO-SERVER MESSAGES
  
 ```
+  Start:       [0][KEY: str] -- start peer with optional peer key
   Listen:      [0][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
-  Stop:        [1][PROTOCOL: rest]            -- stop listening to PROTOCOL
+  Stop:        [1][PROTOCOL: rest] -- stop listening to PROTOCOL
   Close:       [2][ID: 8]                     -- close a stream
   Data:        [3][ID: 8][data: rest]         -- write data to stream
-  Connect:     [4][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- connect to another peer (frames optional)
-  Dsc Listen:  [5][FRAMES: 1][PROTOCOL: rest] -- host a protocol using discovery
-  Dsc Connect: [6][FRAMES: 1][PROTOCOL: STR][PEERID: rest] -- request a connection to a peer potentially requesting a callback
+  Connect:     [4][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
 ```
 
 # SERVER-TO-CLIENT MESSAGES
 
 ```
-  Identify:                [0][PUBLIC: 1][PEERID: str]         -- successful initialization
-  Listener Connection:     [1][ID: 8][PEERID: str][PROTOCOL: rest] -- new listener connection with id ID
-  Connection Closed:       [2][ID: 8][REASON: rest]            -- connection ID closed
-  Data:                    [3][ID: 8][data: rest]              -- receive data from stream with id ID
-  Listen Refused:          [4][PROTOCOL: rest]                 -- could not listen on PROTOCOL
-  Listener Closed:         [5][PROTOCOL: rest]                 -- could not listen on PROTOCOL
-  Peer Connection:         [6][ID: 8][PEERID: str][PROTOCOL: rest] -- connected to a peer with id ID
-  Peer Connection Refused: [7][PEERID: str][PROTOCOL: str][ERROR: rest] -- connection to peer PEERID refused
-  Protocol Error:          [8][MSG: rest]                      -- error in the protocol
-  Dsc Host Connect:        [9][ID: 8][PEERID: str][PROTOCOL: rest] -- connection from a discovery peer
-  Dsc Peer Connect:        [10][ID: 8][PEERID: str][PROTOCOL: rest] -- connected to a discovery host
-  Listening:               [11][PROTOCOL: rest]                -- confirmation that listening has started
+  Hello:                   [0][STARTED: 1] -- hello message indicates whether the peer needs starting
+  Identify:                [1][PUBLIC: 1][PEERID: str][ADDRESSES: str][KEY: rest] -- successful initialization
+  Listener Connection:     [2][ID: 8][PEERID: str][PROTOCOL: rest] -- new listener connection with id ID
+  Connection Closed:       [3][ID: 8][REASON: rest]            -- connection ID closed
+  Data:                    [4][ID: 8][data: rest]              -- receive data from stream with id ID
+  Listen Refused:          [5][PROTOCOL: rest]                 -- could not listen on PROTOCOL
+  Listener Closed:         [6][PROTOCOL: rest]                 -- could not listen on PROTOCOL
+  Peer Connection:         [7][ID: 8][PEERID: str][PROTOCOL: rest] -- connected to a peer with id ID
+  Peer Connection Refused: [8][PEERID: str][PROTOCOL: str][ERROR: rest] -- connection to peer PEERID refused
+  Protocol Error:          [9][MSG: rest]                      -- error in the protocol
+  Listening:               [10][PROTOCOL: rest]                -- confirmation that listening has started
 ```
 */
 "use strict"

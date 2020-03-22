@@ -49,23 +49,28 @@ The client and server exchange these command messages, with the first byte of ea
 # CLIENT-TO-SERVER MESSAGES
  
 ```
-  Listen:       [1][PROTOCOL: rest]              -- request a listener for a protocol
-  Stop:         [2][PROTOCOL: rest]              -- stop listening on PORT
-  Close:        [3][ID: 8]                       -- close a stream
-  Data:         [4][ID: 8][data: rest]           -- write data to stream
-  Peer Connect: [5][PROTOCOL: STR][PEERID: rest] -- connect to another peer
+  Start:       [0][KEY: str] -- start peer with optional peer key
+  Listen:      [0][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
+  Stop:        [1][PROTOCOL: rest] -- stop listening to PROTOCOL
+  Close:       [2][ID: 8]                     -- close a stream
+  Data:        [3][ID: 8][data: rest]         -- write data to stream
+  Connect:     [4][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
 ```
 
 # SERVER-TO-CLIENT MESSAGES
 
 ```
-  Listener Connection:     [1][ID: 8][PROTOCOL: rest] -- new listener connection with id ID
-  Connection Closed:       [2][ID: 8]                 -- connection ID closed
-  Data:                    [3][ID: 8][data: rest]     -- receive data from stream with id ID
-  Listen Refused:          [4][PROTOCOL: rest]        -- could not listen on PORT
-  Listener Closed:         [5][PROTOCOL: rest]        -- could not listen on PORT
-  Peer Connection:         [6][ID: 8]                 -- connected to a peer with id ID
-  Peer Connection Refused: [7][PEERID: rest]          -- connection to peer PEERID refused
+  Hello:                   [0][STARTED: 1] -- hello message indicates whether the peer needs starting
+  Identify:                [1][PUBLIC: 1][PEERID: str][ADDRESSES: str][KEY: rest] -- successful initialization
+  Listener Connection:     [2][ID: 8][PEERID: str][PROTOCOL: rest] -- new listener connection with id ID
+  Connection Closed:       [3][ID: 8][REASON: rest]            -- connection ID closed
+  Data:                    [4][ID: 8][data: rest]              -- receive data from stream with id ID
+  Listen Refused:          [5][PROTOCOL: rest]                 -- could not listen on PROTOCOL
+  Listener Closed:         [6][PROTOCOL: rest]                 -- could not listen on PROTOCOL
+  Peer Connection:         [7][ID: 8][PEERID: str][PROTOCOL: rest] -- connected to a peer with id ID
+  Peer Connection Refused: [8][PEERID: str][PROTOCOL: str][ERROR: rest] -- connection to peer PEERID refused
+  Protocol Error:          [9][MSG: rest]                      -- error in the protocol
+  Listening:               [10][PROTOCOL: rest]                -- confirmation that listening has started
 ```
 
 # Building
@@ -77,7 +82,7 @@ The client and server exchange these command messages, with the first byte of ea
 
 ## Building the default webdir
 
-The `build` file is (probably?) a posix shell script that uses esc to generate files.go by combining examples/* and html/* into a directory and creating a virtual file system out of which the HTTP server serves files.
+The `src/build` file is (probably?) a posix shell script that uses esc to generate files.go by combining examples/* and html/* into a directory and creating a virtual file system out of which the HTTP server serves files.
 
 ## build-and-run
 

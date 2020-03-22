@@ -57,6 +57,22 @@ The client and server exchange these command messages, with the first byte of ea
   Connect:     [5][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
 ```
 
+## Including peer addresses with the peerid
+
+The connect message allows a peer ID or a peer ID plus its addresses. This allows connection to peers without relying on discovery techniques. Users can exchange addresses over other channels, like chat programs.
+
+A peer ID plus its addresses are encoded as
+
+`/addrs/BASE85JSON` where BASE85JSON is a JSON object encoded in base85. The JSON object is like this:
+
+```json
+{
+    "peerID": PEERID,
+    "addrs": [MULTIADDR,...]
+}
+
+```
+
 # SERVER-TO-CLIENT MESSAGES
 
 ```

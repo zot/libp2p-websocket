@@ -1,4 +1,4 @@
-# IPFS-P2P-WEBSOCKET
+# LIBP2P-WEBSOCKET
 
 Relay p2p connections between browsers transcoding between sockets and websockets
 
@@ -13,16 +13,16 @@ license that can be found in the LICENSE file.
 
 # Running
 
-`./libp2p-connection -browser chat.html` will start the relay and pop the chat example in a browser
+`./libp2p-websocket -browser chat.html` will start the relay and pop the chat example in a browser
 
 In development, you can use -files to point to the live html/js/css files you are editing. If you are in the src directory. For example, you should be able to use this command to pop out a development version of chat:
 ```
-libp2p-connection -files html -files examples -browse chat.html
+libp2p-websocket -files html -files examples -browse chat.html
 ```
 
 ## Usage:
 ```
-Usage of libp2p-connection:
+Usage of libp2p-websocket:
   -addr string
         host address to listen on
   -browse string
@@ -41,7 +41,7 @@ Usage of libp2p-connection:
         port to listen on (default 8888)
 ```
 
-# libp2p-connection runs a websocket server on /ws/control
+# libp2p-websocket runs a websocket server on /ws/control
 This allows a browser to control the relay using a very simple binary protocol.
 When a connection closes, it cleans up all of its child connections.
 The client and server exchange these command messages, with the first byte of each message identifying the command.
@@ -85,6 +85,6 @@ Go compiles so fast that, while I'm developing, I build the entire project every
 
 ```shell
 cd src
-./build && go build libp2p-connection.go protocol.go files.go && ./libp2p-connection -browse chat.html
+./build && go build libp2p-websocket.go protocol.go files.go && ./libp2p-websocket -browse chat.html
 ```
 This creates an updated files.go, compiles the project, and then runs the chat example.

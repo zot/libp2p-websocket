@@ -1034,7 +1034,7 @@ func StringsToAddrs(addrStrings []string) (maddrs []multiaddr.Multiaddr, err err
 
 func main() {
 	starting = false
-	startp2p := false
+	disconnected := false
 	log.SetFlags(log.Lshortfile)
 	browse := ""
 	centralRelay = createLibp2pRelay()
@@ -1055,7 +1055,7 @@ func main() {
 	flag.StringVar(&browse, "browse", "", "Browse a URL")
 	flag.BoolVar(&fakeNATPrivate, "fakenatprivate", false, "pretend nat is private")
 	flag.BoolVar(&fakeNATPublic, "fakenatpublic", false, "pretend nat is publc")
-	flag.BoolVar(&startp2p, "start", false, "start peer (do not wait for web client to start it)")
+	flag.BoolVar(&disconnected, "disconnected", false, "allow web client to start peer")
 	flag.Parse()
 	if len(bootstrapArg) > 0 {
 		bootstrapPeers = bootstrapArg
@@ -1067,12 +1067,12 @@ func main() {
 	} else if fakeNATPublic {
 		fakeNatStatus = "public"
 	}
-	if startp2p {
+	if !disconnected {
 		initp2p()
 	}
 	fmt.Printf("Listening on port %v\n", port)
 	http.HandleFunc("/ipfswsrelay/start", func(w http.ResponseWriter, req *http.Request) {
-		if !startp2p && !starting {
+		if disconnected && !starting {
 			fmt.Println("STARTING RELAY...")
 			/// GRAB KEY FROM REQUEST BODY
 			initp2p()

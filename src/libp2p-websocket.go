@@ -40,6 +40,8 @@ import (
 	"encoding/ascii85"
 	"encoding/json"
 	"bytes"
+	"io/ioutil"
+	"strconv"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p-core/network"
@@ -58,9 +60,10 @@ import (
 
 	//dht "github.com/libp2p/go-libp2p-kad-dht"
 	multiaddr "github.com/multiformats/go-multiaddr"
-	logging "github.com/whyrusleeping/go-logging"
+	//logging "github.com/whyrusleeping/go-logging"
 
 	goLog "github.com/ipfs/go-log"
+	log2 "github.com/ipfs/go-log/v2"
 	//"github.com/mr-tron/base58/base58"
 	autonatSvc "github.com/libp2p/go-libp2p-autonat-svc"
 
@@ -85,9 +88,10 @@ type libp2pRelay struct {
 	relay
 	host host.Host
 	discovery *discovery.RoutingDiscovery
-	natStatus autonat.NATStatus
+	natStatus network.Reachability
 	natActions []func()                          // defer these until nat status known
 	connectedPeers map[peer.ID]*libp2pConnection // connected peers
+	externalAddress string
 }
 
 type libp2pClient struct {
@@ -111,6 +115,12 @@ type listener struct {
 	closed bool
 }
 
+var singleConnectionOpt = ""
+var singleConnection = singleConnectionOpt == "true"
+var versionCheckURL = ""
+var versionID = ""
+var curVersionID = ""
+var defaultPage = "index.html"
 var centralRelay *libp2pRelay
 var started bool
 var logger = goLog.Logger("p2pmud")
@@ -167,7 +177,7 @@ func (r *libp2pRelay) libp2pClient(c *client) *libp2pClient {
 
 func (r *libp2pRelay) whenNatKnown(f func()) {
 	svc(r, func() {
-		if r.natStatus != autonat.NATStatusUnknown {
+		if r.natStatus != network.ReachabilityUnknown {
 			f()
 		} else {
 			r.natActions = append(r.natActions, f)
@@ -185,6 +195,15 @@ func (r *libp2pRelay) CreateClient() *client {
 }
 
 func (r *libp2pRelay) CleanupClosed(con *connection) {}
+
+// CloseClient API METHOD
+func (r *libp2pRelay) CloseClient(c *client) {
+	con := c.control
+	if con != nil {
+		delete(r.clients, con)
+	}
+	getLibp2pClient(c).Close()
+}
 
 // LISTEN API METHOD
 func (r *libp2pRelay) Listen(c *client, prot string, frames bool) {
@@ -221,32 +240,40 @@ func (r *libp2pRelay) Stop(c *client, protocol string, retainConnections bool) {
 	}
 }
 
+func (r *libp2pRelay) Versions() (string, string) {
+	return vDate(versionID), vDate(curVersionID)
+}
+
 func (r *libp2pRelay) Started() bool {
 	return started
 }
 
-func (r *libp2pRelay) Start(pk string) {
+func (r *libp2pRelay) Start(port uint16, pk string) error {
 	peerKey = pk
 	fmt.Println("STARTING RELAY...")
+	if (port != 0) {
+		addrs, err := StringsToAddrs([]string{fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port)})
+		if err != nil {return err}
+		listenAddresses = addrs
+	}
 	initp2p()
 	fmt.Println("STARTED")
+	return nil
 }
 
 func (r *libp2pRelay) StartClient(c *client, init func(public bool)) {
-	fmt.Println("SENDING HELLO")
-	c.writePackedMessage(smsgHello, started)
 	go func() {
 		r.whenNatKnown(func() {
 			var public bool
 
 			switch r.natStatus {
-			case autonat.NATStatusUnknown:
+			case network.ReachabilityUnknown:
 				fmt.Println("!!! UNKNOWN")
 				public = true
-			case autonat.NATStatusPublic:
+			case network.ReachabilityPublic:
 				fmt.Println("!!! PUBLIC")
 				public = true
-			case autonat.NATStatusPrivate:
+			case network.ReachabilityPrivate:
 				fmt.Println("!!! PRIVATE")
 				public = false
 			}
@@ -413,7 +440,7 @@ func (r *libp2pRelay) PeerKey() string {
 	return peerKey
 }
 
-func (r *libp2pRelay) setNATStatus(status autonat.NATStatus) {
+func (r *libp2pRelay) setNATStatus(status network.Reachability) {
 	r.natStatus = status
 	for _, f := range r.natActions {
 		f()
@@ -471,6 +498,22 @@ func (c *libp2pClient) libp2pRelay() *libp2pRelay {
 	return getLibp2pRelay(c.relay)
 }
 
+func (c *libp2pClient) Close() {
+	svc(c, func() {
+		for _, l := range c.listeners {
+			l.close(false)
+		}
+		for _, con := range c.forwarders {
+			con.close(func(){})
+		}
+		if c.control != nil {
+			c.control.Close()
+			c.control = nil
+		}
+		c.client.close()
+	})
+}
+
 func (c *libp2pClient) hasConnection(conID uint64) bool {
 	return c.listenerConnections[conID] != nil || c.forwarders[conID] != nil
 }
@@ -510,9 +553,30 @@ func checkErr(err error) {
 	}
 }
 
+func checkVersion() {
+	if (versionCheckURL != "" && centralRelay.peerID != "") {
+		fmt.Println("This version:", versionID)
+		seconds, nanos := versionNumbers(versionID)
+		fmt.Println("FETCHING", fmt.Sprintf(versionCheckURL, centralRelay.peerID, seconds, nanos))
+		resp, err := http.Get(fmt.Sprintf(versionCheckURL, centralRelay.peerID, seconds, nanos))
+		if (err != nil) {
+			fmt.Println("Error: ", err.Error())
+		} else {
+			defer resp.Body.Close()
+			body, err := ioutil.ReadAll(resp.Body)
+			if (err != nil) {
+				fmt.Println("Error: ", err.Error())
+			} else {
+				curVersionID = strings.TrimSpace(string(body))
+				fmt.Println("This version :", vDate(versionID), "\nCurrent version: ", vDate(curVersionID))
+			}
+		}
+	}
+}
+
 func initp2p() {
 	started = true
-	goLog.SetAllLoggers(logging.WARNING)
+	goLog.SetAllLoggers(log2.LevelWarn)
 	goLog.SetLogLevel("rendezvous", "info")
 	ctx := context.Background()
 	opts := []libp2p.Option{
@@ -525,22 +589,32 @@ func initp2p() {
 		key, err := crypto.UnmarshalPrivateKey(keyBytes)
 		opts = append(opts, libp2p.Identity(key))
 	}
+	if fakeNatStatus == "public" {
+		opts = append(opts, libp2p.ForceReachabilityPublic())
+	} else if fakeNatStatus == "private" {
+		opts = append(opts, libp2p.ForceReachabilityPrivate())
+	}
+	fakeNatStatus = ""
 	myHost, err := libp2p.New(ctx, opts...)
 	checkErr(err)
 	logger.Info("Host created. We are:", myHost.ID())
 	logger.Info(myHost.Addrs())
+	fmt.Println("Addrs:", myHost.Addrs())
 	centralRelay.peerID = myHost.ID().Pretty()
 	centralRelay.host = myHost
 
+	checkVersion()
 	if fakeNatStatus == "public" {
-		centralRelay.setNATStatus(autonat.NATStatusPublic)
+		centralRelay.setNATStatus(network.ReachabilityPublic)
 	} else if fakeNatStatus == "private" {
-		centralRelay.setNATStatus(autonat.NATStatusPrivate)
+
+		centralRelay.setNATStatus(network.ReachabilityPrivate)
 	} else {
 		/// MONITOR NAT STATUS
 		fmt.Println("Creating autonat")
-		an := autonat.NewAutoNAT(context.Background(), myHost, nil)
-		centralRelay.natStatus = autonat.NATStatusUnknown
+		an, err := autonat.New(context.Background(), myHost)
+		checkErr(err)
+		centralRelay.natStatus = network.ReachabilityUnknown
 		go func() {
 			peeped := false
 			for {
@@ -548,24 +622,24 @@ func initp2p() {
 				svcSync(centralRelay, func() interface{} {
 					if status != centralRelay.natStatus || !peeped {
 						switch status {
-						case autonat.NATStatusUnknown:
+						case network.ReachabilityUnknown:
 							fmt.Println("@@@ NAT status UNKNOWN")
 							addr, err := an.PublicAddr()
 							if err == nil {
 								fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
 								centralRelay.printAddresses()
 							}
-						case autonat.NATStatusPublic:
+						case network.ReachabilityPublic:
 							fmt.Println("@@@ NAT status PUBLIC")
 							addr, err := an.PublicAddr()
 							if err == nil {
 								fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
 								centralRelay.printAddresses()
 							}
-						case autonat.NATStatusPrivate:
+						case network.ReachabilityPrivate:
 							fmt.Println("@@@ NAT status PRIVATE")
 						}
-						if status != autonat.NATStatusUnknown {
+						if status != network.ReachabilityUnknown {
 							centralRelay.setNATStatus(status)
 						}
 					}
@@ -575,14 +649,13 @@ func initp2p() {
 				time.Sleep(250 * time.Millisecond)
 			}
 		}()
+		autonatSvc.NewAutoNATService(context.Background(), myHost)
 	}
 	key := myHost.Peerstore().PrivKey(myHost.ID())
 	keyBytes, err := crypto.MarshalPrivateKey(key)
 	checkErr(err)
 	peerKey = crypto.ConfigEncodeKey(keyBytes)
 	fmt.Printf("host private %s key: %s\n", reflect.TypeOf(key), peerKey)
-
-	autonatSvc.NewAutoNATService(context.Background(), myHost)
 
 	// Let's connect to the bootstrap nodes first. They will tell us about the
 	// other nodes in the network.
@@ -609,6 +682,25 @@ func initp2p() {
 	fmt.Println("FINISHED INITIALIZING P2P, CREATING RELAY")
 	runSvc(centralRelay)
 	fmt.Printf("Peer id: %v\n", centralRelay.peerID)
+}
+
+func versionNumbers(v string) (string, string) {
+	fmt.Println("Checking version: ", v)
+	times := strings.Split(v, ".")
+	seconds := times[0]
+	nanos := times[1]
+	return seconds, strings.Repeat("0", len(nanos) - 9) + nanos
+}
+
+func vDate(v string) string {
+	if (v == "") {return ""}
+	secStr, nanoStr := versionNumbers(v)
+	seconds, err := strconv.ParseInt(secStr, 10, 64)
+	if (err != nil) {seconds = 0}
+	nanos, err := strconv.ParseInt(nanoStr, 10, 64)
+	if (err != nil) {nanos = 0}
+	t := time.Unix(seconds, nanos)
+	return t.Format("2006-01-02T03:04:05PM-07:00")
 }
 
 func (fl *fileList) String() string {
@@ -660,6 +752,7 @@ func main() {
 	started = false
 	log.SetFlags(log.Lshortfile)
 	browse := ""
+	nobrowse := false
 	centralRelay = createLibp2pRelay()
 	addr := "localhost"
 	port := 8888
@@ -668,17 +761,24 @@ func main() {
 	fileList := fileList([]string{})
 	fakeNATPrivate := false
 	fakeNATPublic := false
-	flag.BoolVar(&noBootstrap, "nopeers", false, "clear the bootstrap peer list")
-	flag.StringVar(&peerKey, "key", "", "specify peer key")
-	flag.Var(&fileList, "files", "add the contents of a directory to serve from /")
-	flag.StringVar(&addr, "addr", "", "host address to listen on")
-	flag.IntVar(&port, "port", port, "port to listen on")
+	version := false
+	flag.BoolVar(&noBootstrap, "nopeers", false, "Clear the bootstrap peer list")
+	flag.StringVar(&peerKey, "key", "", "Specify peer key")
+	flag.Var(&fileList, "files", "Add the contents of a directory to serve from /")
+	flag.StringVar(&addr, "addr", "", "Host address to listen on")
+	flag.IntVar(&port, "port", port, "Port to listen on")
 	flag.Var(&bootstrapArg, "peer", "Adds a peer multiaddress to the bootstrap list")
 	flag.Var(&listenAddresses, "listen", "Adds a multiaddress to the listen list")
-	flag.StringVar(&browse, "browse", "", "Browse a URL")
-	flag.BoolVar(&fakeNATPrivate, "fakenatprivate", false, "pretend nat is private")
-	flag.BoolVar(&fakeNATPublic, "fakenatpublic", false, "pretend nat is publc")
+	flag.StringVar(&browse, "browse", defaultPage, "Launch browser with this page")
+	flag.BoolVar(&nobrowse, "nobrowse", false, "Do not launch browser")
+	flag.BoolVar(&fakeNATPrivate, "fakenatprivate", false, "Pretend nat is private")
+	flag.BoolVar(&fakeNATPublic, "fakenatpublic", false, "Pretend nat is publc")
+	flag.BoolVar(&version, "version", false, "Print version number and exit")
 	flag.Parse()
+	if (version) {
+		fmt.Println("Version ", versionID)
+		os.Exit(0)
+	}
 	if len(bootstrapArg) > 0 {
 		bootstrapPeers = bootstrapArg
 	} else {
@@ -709,7 +809,7 @@ func main() {
 	} else {
 		http.Handle("/", http.FileServer(FS(false)))
 	}
-	if browse != "" {
+	if !nobrowse && browse != "" {
 		browser.OpenURL(fmt.Sprintf("http://localhost:%d/%s", port, browse))
 	}
 	log.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%d", addr, port), nil))

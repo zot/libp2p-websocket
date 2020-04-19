@@ -195,8 +195,9 @@ type relay struct {
 }
 
 type protocolHandler interface {
+	Versions() (string, string)
 	Started() bool
-	Start(peerKey string)
+	Start(port uint16, peerKey string) error
 	HasConnection(c *client, id uint64) bool
 	CreateClient() *client
 	StartClient(c *client, init func(public bool))
@@ -208,6 +209,7 @@ type protocolHandler interface {
 	CleanupClosed(c *connection)
 	AddressesJson() string
 	PeerKey() string
+	CloseClient(c *client)
 }
 
 type chanSvc interface {
@@ -327,11 +329,11 @@ func (c *connection) writeData(r *relay, data []byte) {
 			len, err := c.stream.Write(data)
 			if err != nil {
 				if _, ok := err.(net.Error); ok && err.(net.Error).Timeout() {
-					fmt.Println("continuing from write timeout")
+					//fmt.Println("continuing from write timeout")
 					continue
 				}
 				if err != nil && errors.Is(err, syscall.ETIMEDOUT) {
-					fmt.Println("continuing from write timeout")
+					//fmt.Println("continuing from write timeout")
 					continue
 				}
 				if err != nil {
@@ -433,6 +435,7 @@ func (c *client) readWebsocket(r *relay) {
 				fmt.Printf("@@@ READ MESSAGE %s: %X\n", messageType(data[0]).clientName(), data[1:])
 			} else {
 				fmt.Println("ERROR READING WEB SOCKET", err)
+				break
 			}
 			svc(c, func() {
 				if err == nil && len(data) > 0 {
@@ -473,7 +476,10 @@ func (c *client) readWebsocket(r *relay) {
 			})
 			<-syncChan
 		}
-		fmt.Println("DONE READING WEB SOCKET")
+		fmt.Println("@@@\n@@@ DONE READING WEB SOCKET\n@@@")
+		svc(r, func() {
+			r.CloseClient(c)
+		})
 	}()
 }
 
@@ -530,11 +536,11 @@ func reallyReadFull(stream twoWayStream, buf []byte) error {
 		start += len
 		if err != nil {
 			if _, ok := err.(net.Error); ok && err.(net.Error).Timeout() {
-				fmt.Println("continuing from read timeout")
+				//fmt.Println("continuing from read timeout")
 				continue
 			}
 			if err != nil && errors.Is(err, syscall.ETIMEDOUT) {
-				fmt.Println("continuing from read timeout")
+				//fmt.Println("continuing from read timeout")
 				continue
 			}
 			return err
@@ -680,12 +686,16 @@ func (r *relay) StartClient(c *client, init func(public bool)) {
 	r.handler.StartClient(c, init)
 }
 
+func (r *relay) Versions() (string, string) {
+	return r.handler.Versions()
+}
+
 func (r *relay) Started() bool {
 	return r.handler.Started()
 }
 
-func (r *relay) Start(pk string) {
-	r.handler.Start(pk)
+func (r *relay) Start(port uint16, pk string) error {
+	return r.handler.Start(port, pk)
 }
 
 func (r *relay) HasConnection(c *client, id uint64) bool {
@@ -716,6 +726,10 @@ func (r *relay) Connect(c *client, protocol string, peerID string, frames bool, 
 	r.handler.Connect(c, protocol, peerID, frames, relay)
 }
 
+func (r *relay) CloseClient(c *client) {
+	r.handler.CloseClient(c)
+}
+
 func (r *relay) init(handler protocolHandler) {
 	r.clients = make(map[*websocket.Conn]*client)
 	r.managementChan = make(chan func())
@@ -737,8 +751,25 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 		if err != nil {
 			log.Printf("error: %v", err)
 		} else {
+			if singleConnection && started {
+				fmt.Println("CHECKING FOR OLD CONNECTIONS")
+				alreadyConnected := svcSync(r, func() interface{} {
+					// only allowing one client for now
+					for range r.clients {
+						return fmt.Errorf("Connected")
+					}
+					return nil
+				})
+				if alreadyConnected != nil {
+					con.WriteMessage(websocket.BinaryMessage, pack(smsgError, "There is already a connection"))
+					con.Close()
+					return
+				}
+			}
 			started := r.Started()
-			err := con.WriteMessage(websocket.BinaryMessage, pack(smsgHello, started))
+			//fmt.Println("SENDING HELLO")
+			v, _ := r.Versions()
+			err := con.WriteMessage(websocket.BinaryMessage, pack(smsgHello, started, v))
 			if err != nil {
 				log.Printf("Error writing initial message: %v\n", err)
 				con.Close()
@@ -764,8 +795,14 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 						con.Close()
 					}
 					if messageType(data[0]) == cmsgStart {
-						r.Start(string(data[1:]))
-						r.runProtocol(con)
+						port := uint16(data[1]) << 8 + uint16(data[2])
+						err := r.Start(port, string(data[3:]))
+						if err != nil {
+							fmt.Println("ERROR, BAD PORT:", port)
+							con.Close()
+						} else {
+							r.runProtocol(con)
+						}
 					} else {
 						fmt.Println("ERROR, EXPECTED START MESSAGE BUT GOT", messageType(data[0]).clientName)
 						con.Close()
@@ -810,7 +847,8 @@ func (r *relay) runProtocol(con *websocket.Conn) {
 		}()
 		// start the client, send ident message when ready
 		r.StartClient(client, func(public bool) {
-			client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson(), r.handler.PeerKey())
+			_, v2 := r.Versions()
+			client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson(), r.handler.PeerKey(), v2)
 			runSvc(client)
 			client.readWebsocket(r)
 		})

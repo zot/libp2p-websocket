@@ -470,7 +470,6 @@ func (c *client) readWebsocket(r *relay) {
 					}
 				} else if err != nil {
 					log.Printf("error: %v\n", err)
-					c.close()
 				}
 				syncChan <- true
 			})

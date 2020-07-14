@@ -50,6 +50,7 @@
   Peer Connection Refused: [8][PEERID: str][PROTOCOL: str][ERROR: rest] -- connection to peer PEERID refused
   Protocol Error:          [9][MSG: rest]                      -- error in the protocol
   Listening:               [10][PROTOCOL: rest]                -- confirmation that listening has started
+  Access Change:           [11][PUBLIC: 1]                     -- peer access has changed
 ```
 */
 "use strict"
@@ -86,7 +87,14 @@ const smsg = Object.freeze({
     peerConnectionRefused: 8,
     error: 9,
     listening: 10,
+    accessChange: 11,
 });
+
+const errors = Object.freeze({
+    unknownCommand: 0,
+    badComand: 1,
+    error: 2,
+})
 
 var ws;
 var peerID;
@@ -140,16 +148,12 @@ function close(conID, cb) {
     ws.send(buf, cb);
 }
 
-function start(peerKey) {
-    ws.send(Uint8Array.from([cmsg.start, ...utfEncoder.encode(peerKey || '')]));
+function start(port, peerKey) {
+    ws.send(Uint8Array.from([cmsg.start, port >> 8, port & 0xFF, ...utfEncoder.encode(peerKey || '')]));
 }
 
 function listen(protocol, frames) {
     ws.send(Uint8Array.from([cmsg.listen, frames ? 1 : 0, ...utfEncoder.encode(protocol)]));
-}
-
-function discoveryListen(protocol, frames) {
-    ws.send(Uint8Array.from([cmsg.discoveryListen, frames ? 1 : 0, ...utfEncoder.encode(protocol)]));
 }
 
 // stop listening but do not close connections
@@ -166,17 +170,10 @@ function connect(peerID, prot, frames, relay) {
                              ...utfEncoder.encode(peerID)]));
 }
 
-function discoveryConnect(peerID, prot, frames) {
-    ws.send(Uint8Array.from([cmsg.discoveryConnect,
-                             frames ? 1 : 0,
-                             prot.length >> 8, prot.length & 0xFF, ...utfEncoder.encode(prot),
-                             ...utfEncoder.encode(peerID)]));
-}
-
 // methods mimic the parameter order of the protocol
 class BlankHandler {
-    hello(running) {}
-    ident(status, peerID, addresses, peerKey) {}
+    hello(running, thisVersion) {}
+    ident(status, peerID, addresses, peerKey, currentVersion) {}
     listenerConnection(conID, peerID, prot) {}
     connectionClosed(conID, msg) {}
     data(conID, data, obj) {}  // obj is optionally a JSON object
@@ -185,20 +182,18 @@ class BlankHandler {
     peerConnection(conID, peerID, prot) {}
     peerConnectionRefused(peerID, prot, msg) {}
     error(msg) {}
-    discoveryHostConnect(conID, peerID, prot) {}
-    discoveryPeerConnect(conID, peerID, prot) {}
     listening(protocol) {}
-    discoveryAwaitingCallback(protocol) {}
+    accessChange(access) {}
 }
 
 class DelegatingHandler {
     constructor(delegate) {
         this.delegate = delegate;
     }
-    hello(running) {
+    hello(running, thisVersion) {
         tryDelegate(this.delegate, 'hello', arguments);
     }
-    ident(status, peerID, addresses, peerKey) {
+    ident(status, peerID, addresses, peerKey, currentVersion) {
         tryDelegate(this.delegate, 'ident', arguments);
     }
     listenerConnection(conID, peerID, prot) {
@@ -225,17 +220,11 @@ class DelegatingHandler {
     error(msg) {
         tryDelegate(this.delegate, 'error', arguments);
     }
-    discoveryHostConnect(conID, peerID, prot) {
-        tryDelegate(this.delegate, 'discoveryHostConnect', arguments);
-    }
-    discoveryPeerConnect(conID, peerID, prot) {
-        tryDelegate(this.delegate, 'discoveryPeerConnect', arguments);
-    }
     listening(protocol) {
         tryDelegate(this.delegate, 'listening', arguments);
     }
-    discoveryAwaitingCallback(protocol) {
-        tryDelegate(this.delegate, 'discoveryAwaitingCallback', arguments);
+    accessChange(status) {
+        tryDelegate(this.delegate, 'accessChange', arguments);
     }
     insertDelegatingHandler(hand) {
         hand.delegate = this.delegate;
@@ -291,7 +280,7 @@ class CommandHandler extends DelegatingHandler {
                 if (this.delegateData) {
                     return super.data(conID, data);
                 }
-                return connectionError(conID, relayErrors.badCommand, 'Bad command, could not parse JSON', true);
+                return connectionError(conID, errors.badCommand, 'Bad command, could not parse JSON', true);
             }
         }
         if (this.shouldHandleCommand(info, data, obj)) {
@@ -302,10 +291,10 @@ class CommandHandler extends DelegatingHandler {
                 if (this.delegateData) {
                     super.data(conID, data, obj);
                 } else {
-                    connectionError(conID, relayErrors.unknownCommand, 'Unknown command: '+obj.name, true);
+                    connectionError(conID, errors.unknownCommand, 'Unknown command: '+obj.name, true);
                 }
             } catch (err) {
-                connectionError(conID, relayErrors.error, 'Error during command "'+obj.name+'":\n'+err.stack, true);
+                connectionError(conID, errors.error, 'Error during command "'+obj.name+'":\n'+err.stack, true);
             }
         } else {
             super.data(conID, data, obj);
@@ -333,9 +322,9 @@ class LoggingHandler extends DelegatingHandler {
     constructor(delegate) {
         super(delegate);
     }
-    ident(status, peerID, addresses, peerKey) {
+    ident(status, peerID, addresses, peerKey, currentVersion) {
         receivedMessageArgs('ident', arguments);
-        super.ident(status, peerID, addresses, peerKey);
+        super.ident(status, peerID, addresses, peerKey, currentVersion);
     }
     listenerConnection(conID, peerID, prot) {
         receivedMessageArgs('listenerConnection', arguments);
@@ -369,21 +358,13 @@ class LoggingHandler extends DelegatingHandler {
         receivedMessageArgs('error', arguments);
         super.error(msg);
     }
-    discoveryHostConnect(conID, peerID, prot) {
-        receivedMessageArgs('discoveryHostConnect', arguments);
-        super.discoveryHostConnect(conID, peerID, prot);
-    }
-    discoveryPeerConnect(conID, peerID, prot) {
-        receivedMessageArgs('discoveryPeerConnect', arguments);
-        super.discoveryPeerConnect(conID, peerID, prot);
-    }
     listening(protocol) {
         receivedMessageArgs('listening', arguments);
         super.listening(protocol)
     }
-    discoveryAwaitingCallback(protocol) {
-        receivedMessageArgs('discoveryAwaitingCallback', arguments);
-        super.discoveryAwaitingCallback(protocol);
+    accessChange(status) {
+        receivedMessageArgs('accessChange', arguments);
+        super.accessChange(status)
     }
 }
 
@@ -430,10 +411,10 @@ class TrackingHandler extends DelegatingHandler {
         connections.listeningTo = new Set();
         //connections.awaitingCallbacks = new Set();
     }
-    ident(status, peerID, addresses, peerKey) {
+    ident(status, peerID, addresses, peerKey, currentVersion) {
         this.connections.peerID = peerID;
         this.connections.natStatus = status;
-        super.ident(status, peerID, addresses, peerKey);
+        super.ident(status, peerID, addresses, peerKey, currentVersion);
     }
     listenerConnection(conID, peerID, prot) {
         var con = new ConnectionInfo(conID, peerID, prot, true);
@@ -473,23 +454,6 @@ class TrackingHandler extends DelegatingHandler {
         this.connections.listeningTo.add(protocol);
         super.listening(protocol);
     }
-/*
-    discoveryHostConnect(conID, peerID, prot) {
-        this.connections.incomingConnections.set(conID, new ConnectionInfo(conID, peerID, prot, true));
-        super.discoveryHostConnect(conID, peerID, prot);
-    }
-    discoveryPeerConnect(conID, peerID, prot) {
-        this.connections.outgoingConnections.set(conID, prot);
-        this.connections.awaitingCallbacks.delete(prot);
-        super.discoveryPeerConnect(conID, peerID, prot);
-    }
-*/
-/*
-    discoveryAwaitingCallback(protocol) {
-        this.connections.awaitingCallbacks.add(protocol);
-        super.discoveryAwaitingCallback(protocol);
-    }
-*/
 }
 
 /* Commands the relay can receive
@@ -554,6 +518,9 @@ class RelayService extends CommandHandler {
     startRelay() {
         listen(this.relayProtocol, true);
     }
+    stopRelay() {
+        stop(this.relayProtocol)
+    }
     // P2P API
     connectionClosed(conID, msg) {
         var info = getConnectionInfo(this.connections, conID);
@@ -576,7 +543,7 @@ class RelayService extends CommandHandler {
     // RELAY CMD API
     requestHosting(info, {protocol}) {
         this.getRelayInfo(info);
-        if (this.allowedPeers != null && !this.allowedPeers.has(info.peerID)) {
+        if (this.allowedPeers && !this.allowedPeers.has(info.peerID)) {
             connectionError(info.conID, relayErrors.hostingNotAllowed, 'Not allowed to use relay', true);
         } else if (this.allowedHosts && (!this.allowedHosts.has(info.peerID) || this.allowedHosts.get(info.peerID).has(protocol))) {
             connectionError(info.conID, relayErrors.hostingNotAllowed, 'Not allowed to be a relay host for '+protocol, true);
@@ -602,7 +569,7 @@ class RelayService extends CommandHandler {
     }
     // RELAY CMD API
     requestRelaying(info, {peerID, protocol}) {
-        if (this.allowedPeers != null && !this.allowedPeers.has(info.peerID)) {
+        if (this.allowedPeers && !this.allowedPeers.has(info.peerID)) {
             return connectionError(info.conID, relayErrors.hostingNotAllowed, 'Not allowed to use relay', true);
         }
         var relayPeerInfo = this.relayPeers.get(peerID);
@@ -692,7 +659,7 @@ class RelayService extends CommandHandler {
         return info;
     }
     // Allow host peerID to request relaying for protocol
-    enableRelay(peerID, protocol) {
+    enableHost(peerID, protocol) {
         if (peerID && protocol) {
             if (this.allowedHosts == null) {
                 this.allowedHosts = new Map();
@@ -705,7 +672,7 @@ class RelayService extends CommandHandler {
             prots.add(protocol);
         }
     }
-    disableRelay(peerID, protocol) {
+    disableHost(peerID, protocol) {
         if (peerID && this.allowedHosts) {
             var prots = this.allowedHosts.get(peerID);
 
@@ -718,12 +685,17 @@ class RelayService extends CommandHandler {
             }
         }
     }
-    allowPeer(peerID) {
+    enablePeer(peerID) {
         if (this.allowedPeers == null) {
             this.allowedPeers = new Set();
         }
         if (peerID) {
             this.allowedPeers.add(peerID);
+        }
+    }
+    disablePeer(peerID) {
+        if (this.allowedPeers) {
+            this.allowedPeers.delete(peerID)
         }
     }
 }
@@ -895,16 +867,18 @@ function startProtocol(urlStr, handler) {
             console.log("TYPE: ", enumFor(smsg, data[0]));
             switch (data[0]) {
             case smsg.hello: {
-                handler.hello(data[1] != 0);
+                let thisVersion = getString(data.slice(2))
+                handler.hello(data[1] != 0, thisVersion)
                 break;
             }
             case smsg.ident: {
                 var publicPeer = data[1]
-                var peerID = getCountedString(dv, 2);
-                var addressesStr = getCountedString(dv, 4 + peerID.length);
+                var [peerID, pidNxt] = getCountedStringNext(dv, 2);
+                var [addressesStr, addrNxt] = getCountedStringNext(dv, pidNxt);
+                var [peerKey, pkNxt] = getCountedStringNext(dv, addrNxt);
+                var currentVersion = getString(data.slice(pkNxt));
                 var addresses = JSON.parse(addressesStr);
-                var peerKey = getString(data.slice(6 + peerID.length + addressesStr.length));
-                handler.ident(publicPeer ? natStatus.public : natStatus.private, peerID, addresses, peerKey);
+                handler.ident(publicPeer ? natStatus.public : natStatus.private, peerID, addresses, peerKey, currentVersion);
                 break;
             }
             case smsg.listenerConnection: {
@@ -941,10 +915,9 @@ function startProtocol(urlStr, handler) {
                 handler.peerConnection(conID, peerID, prot)
                 break;
             case smsg.peerConnectionRefused: {
-                var prot = getCountedString(dv, 1);
-                var peerIDStart = prot.length + 2 + 1;
-                var peerID = getCountedString(dv, peerIDStart);
-                var msg = getString(data.slice(peerIDStart + peerID.length + 2));
+                var [peerID, peerNext] = getCountedStringNext(dv, 1)
+                var [prot, protNext] = getCountedStringNext(dv, peerNext)
+                var msg = getString(data.slice(protNext));
 
                 handler.peerConnectionRefused(peerID, prot, msg);
                 break;
@@ -952,29 +925,22 @@ function startProtocol(urlStr, handler) {
             case smsg.error:
                 handler.error(getString(data.slice(1)));
                 break;
-            case smsg.discoveryHostConnect:
-                var conID = dv.getBigUint64(1)
-                var peerID = getCountedString(dv, 9)
-                var prot = getString(data.slice(9 + peerID.length + 2))
-
-                handler.discoveryHostConnect(conID, peerID, prot);
-                break;
-            case smsg.discoveryPeerConnect:
-                var conID = dv.getBigUint64(1)
-                var peerID = getCountedString(dv, 9)
-                var prot = getString(data.slice(9 + peerID.length + 2))
-
-                handler.discoveryPeerConnect(conID, peerID, prot);
-                break;
             case smsg.listening:
                 handler.listening(getString(data.slice(1)));
                 break;
-            case smsg.discoveryAwaitingCallback:
-                handler.discoveryAwaitingCallback(getString(data.slice(1)));
+            case smsg.accessChange:
+                handler.accessChange(data[1]);
                 break;
             }
         });
     }
+    return ws
+}
+
+function getCountedStringNext(dv, offset) {
+    let str = getCountedString(dv, offset);
+
+    return [str, offset + 2 + str.length];
 }
 
 function getCountedString(dv, offset) {
@@ -1086,6 +1052,7 @@ export default {
     BlankHandler,
     CommandHandler,
     TrackingHandler,
+    DelegatingHandler,
     LoggingHandler,
     checkProt,
     checkPeerID,
@@ -1095,8 +1062,6 @@ export default {
     stop,
     listen,
     connect,
-    discoveryListen,
-    discoveryConnect,
     getString,
     close,
     connectionError,
@@ -1110,4 +1075,6 @@ export default {
     natStatus,
     getInfoForPeerAndProtocol,
     relayErrors,
+    utfDecoder,
+    utfEncoder,
 }

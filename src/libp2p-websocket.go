@@ -121,6 +121,7 @@ var versionCheckURL = ""
 var versionID = ""
 var curVersionID = ""
 var defaultPage = "index.html"
+var urlPrefix = "" // must begin and end with a slash or must be empty!
 var centralRelay *libp2pRelay
 var started bool
 var logger = goLog.Logger("p2pmud")
@@ -146,8 +147,8 @@ var bootstrapPeerStrings = []string{
 var peerFinder interface {
 	FindPeer(context.Context, peer.ID) (peer.AddrInfo, error)
 }
-
 var logCount int = 1
+var accessChan chan network.Reachability = make(chan network.Reachability)
 
 func (err retryError) Error() string {
 	if err == "" {
@@ -259,6 +260,10 @@ func (r *libp2pRelay) Start(port uint16, pk string) error {
 	initp2p()
 	fmt.Println("STARTED")
 	return nil
+}
+
+func (r *libp2pRelay) PeerAccess() chan network.Reachability {
+	return accessChan
 }
 
 func (r *libp2pRelay) StartClient(c *client, init func(public bool)) {
@@ -642,6 +647,7 @@ func initp2p() {
 						if status != network.ReachabilityUnknown {
 							centralRelay.setNATStatus(status)
 						}
+						accessChan <- status
 					}
 					return nil
 				})
@@ -795,9 +801,10 @@ func main() {
 		for _, dir := range fileList {
 			fmt.Println("File dir: ", dir)
 		}
-		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.HandleFunc(urlPrefix, func(w http.ResponseWriter, r *http.Request) {
 			for _, dir := range fileList {
-				reqFile, err := filepath.Abs(filepath.Join(dir, r.URL.Path))
+				fmt.Println("SERVING FILE: ", filepath.Join(dir, r.URL.Path[len(urlPrefix) - 1:]))
+				reqFile, err := filepath.Abs(filepath.Join(dir, r.URL.Path[len(urlPrefix) - 1:]))
 				if err != nil {continue}
 				_, err = os.Stat(reqFile)
 				if err != nil {continue}
@@ -807,7 +814,7 @@ func main() {
 			http.Error(w, "Not found", http.StatusNotFound)
 		})
 	} else {
-		http.Handle("/", http.FileServer(FS(false)))
+		http.Handle(urlPrefix, http.StripPrefix(urlPrefix, http.FileServer(FS(false))))
 	}
 	if !nobrowse && browse != "" {
 		browser.OpenURL(fmt.Sprintf("http://localhost:%d/%s", port, browse))

@@ -62,6 +62,7 @@ messages, with the first byte of each message identifying the command.
   Peer Connection Refused: [8][PEERID: str][PROTOCOL: str][ERROR: rest] -- connection to peer PEERID refused
   Protocol Error:          [9][MSG: rest]                      -- error in the protocol
   Listening:               [10][PROTOCOL: rest]                -- confirmation that listening has started
+  Access Change:           [11][PUBLIC: 1]                     -- peer access has changed
 ```
 
 This code uses quite a few goroutines and channels. Here is the pattern:
@@ -89,6 +90,7 @@ import (
 	"syscall"
 	"bytes"
 	"sync/atomic"
+	"github.com/libp2p/go-libp2p-core/network"
 )
 
 type messageType byte
@@ -112,10 +114,11 @@ const (
 	smsgPeerConnectionRefused
 	smsgError
 	smsgListening
+	smsgAccessChange
 )
 
 var cmsgNames = [...]string{"cmsgStart", "cmsgListen", "cmsgStop", "cmsgClose", "cmsgData", "cmsgConnect"}
-var smsgNames = [...]string{"smsgHello", "smsgIdent", "smsgNewConnection", "smsgConnectionClosed", "smsgData", "smsgListenRefused", "smsgListenerClosed", "smsgPeerConnection", "smsgPeerConnectionRefused", "smsgError", "smsgListening"}
+var smsgNames = [...]string{"smsgHello", "smsgIdent", "smsgNewConnection", "smsgConnectionClosed", "smsgData", "smsgListenRefused", "smsgListenerClosed", "smsgPeerConnection", "smsgPeerConnectionRefused", "smsgError", "smsgListening", "smsgAccessChange"}
 
 const (
 	maxMessageSize = 65536 // Maximum websocket message size
@@ -185,6 +188,7 @@ type client struct {
 	relay *relay
 	data interface{}
 	ticker *time.Ticker
+	access network.Reachability
 }
 
 type relay struct {
@@ -192,12 +196,14 @@ type relay struct {
 	managementChan chan func()               // client creation
 	handler protocolHandler
 	peerID string
+	access network.Reachability
 }
 
 type protocolHandler interface {
 	Versions() (string, string)
 	Started() bool
 	Start(port uint16, peerKey string) error
+	PeerAccess() chan network.Reachability
 	HasConnection(c *client, id uint64) bool
 	CreateClient() *client
 	StartClient(c *client, init func(public bool))
@@ -655,6 +661,9 @@ func (c *client) writePackedMessage(typ messageType, items ...interface{}) error
 
 func (c *client) writeFullMessage(msg []byte) error {
 	fmt.Printf("@@@ Writing message type %v\n", messageType(msg[0]).serverName())
+	if c.control == nil {
+		return fmt.Errorf("Connection closed")
+	}
 	werr := c.control.WriteMessage(websocket.BinaryMessage, msg)
 	if werr != nil {
 		svc(c, func() {
@@ -694,7 +703,42 @@ func (r *relay) Started() bool {
 }
 
 func (r *relay) Start(port uint16, pk string) error {
-	return r.handler.Start(port, pk)
+	if err := r.handler.Start(port, pk); err != nil {return err}
+	go func() {
+		for {
+			status := <- r.handler.PeerAccess()
+			switch status {
+			case network.ReachabilityUnknown:
+				fmt.Printf("@@@@@ RECEIVED ACCESS CHANGED TO UNKNOWN\n")
+			case network.ReachabilityPublic:
+				fmt.Printf("@@@@@ RECEIVED ACCESS CHANGE TO PUBLIC\n")
+			case network.ReachabilityPrivate:
+				fmt.Printf("@@@@@ RECEIVED ACCESS CHANGE TO PRIVATE\n")
+			}
+			for _, c := range r.clients {
+				svc(c, func() {
+					if c.access != status {
+						c.access = status
+						sending := 0
+						switch status {
+						case network.ReachabilityUnknown:
+							sending = 0
+						case network.ReachabilityPrivate:
+							sending = 1
+						case network.ReachabilityPublic:
+							sending = 2
+						}
+						c.writePackedMessage(smsgAccessChange, byte(sending))
+					}
+				})
+			}
+		}
+	}()
+	return nil
+}
+
+func (r *relay) PeerAccess() chan network.Reachability {
+	return r.handler.PeerAccess()
 }
 
 func (r *relay) HasConnection(c *client, id uint64) bool {
@@ -820,6 +864,7 @@ func (r *relay) runProtocol(con *websocket.Conn) {
 	svc(r, func() {
 		client := r.CreateClient()
 		client.control = con
+		r.access = network.ReachabilityUnknown
 		r.clients[con] = client
 		// start websocket ping/pong keepalive
 		con.SetReadDeadline(time.Now().Add(pongWait))

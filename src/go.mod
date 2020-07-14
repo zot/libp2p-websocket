@@ -5,6 +5,7 @@ go 1.13
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/ipfs/go-log v1.0.3
+	github.com/ipfs/go-log/v2 v2.0.3
 	github.com/libp2p/go-libp2p v0.8.0
 	github.com/libp2p/go-libp2p-autonat v0.2.2
 	github.com/libp2p/go-libp2p-autonat-svc v0.1.0

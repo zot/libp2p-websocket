@@ -189,6 +189,9 @@ type smsgPeerConnectionParams struct {
 	protocol string
 }
 type smsgPeerConnectionRefusedParams struct {
+	peerID   string
+	protocol string
+	reaon    string
 }
 type smsgErrorParams struct {
 	message string
@@ -197,6 +200,7 @@ type smsgListeningParams struct {
 	protocol string
 }
 type smsgAccessChangeParams struct {
+	access int
 }
 
 type messageParams interface{ msgType() messageType }
@@ -245,6 +249,14 @@ func isNum(t reflect.Type) bool {
 }
 
 func marshal(aStruct interface{}) ([]byte, error) {
+	tmpMap, err := structToMap(aStruct)
+	if err != nil {
+		return nil, err
+	}
+	return msgpack.Marshal(tmpMap)
+}
+
+func structToMap(aStruct interface{}) (map[string]interface{}, error) {
 	tmpMap := make(map[string]interface{})
 	val := reflect.ValueOf(aStruct)
 	if reflect.Indirect(val) == val {
@@ -267,30 +279,29 @@ func marshal(aStruct interface{}) ([]byte, error) {
 		}
 		tmpMap[ft.Name] = f.Interface()
 	}
-	return msgpack.Marshal(tmpMap)
+	return tmpMap, nil
 }
 
 func unmarshal(bytes []byte, aStruct interface{}) error {
 	var tmpMap map[string]interface{}
-	errorf := func(msg string, args ...interface{}) error {
-		e := fmt.Errorf(msg, args...)
-		fmt.Println("ERROR:", e.Error())
-		return e
-	}
 
 	err := msgpack.Unmarshal(bytes, &tmpMap)
 	if err != nil {
 		return err
 	}
+	return mapToStruct(tmpMap, aStruct)
+}
+
+func mapToStruct(aMap map[string]interface{}, aStruct interface{}) error {
 	inputValue := reflect.Indirect(reflect.ValueOf(aStruct))
 	if reflect.Indirect(inputValue) == inputValue {
-		return errorf("Attempt to call unmarshall without a pointer")
+		return fmt.Errorf("Attempt to call unmarshall without a pointer")
 	}
 	t := reflect.Indirect(inputValue).Type()
 	fmt.Printf("TYPE: %v\n", t)
 	result := reflect.New(t)
 	newDataValue := reflect.Indirect(result)
-	for k, v := range tmpMap {
+	for k, v := range aMap {
 		if sf, present := t.FieldByName(k); present {
 			f, err := privateStructValue(t, sf, newDataValue.FieldByName(k))
 			if err != nil {
@@ -320,7 +331,6 @@ func privateStructValue(t reflect.Type, sf reflect.StructField, field reflect.Va
 	if sf.PkgPath == "" {
 		return field, fmt.Errorf("cannot set %s.%s", t.Name(), sf.Name)
 	}
-	//fmt.Printf("CHECKING PRIVATE FOR %s.%s: %v\n", t.Name(), sf.Name, field.Type())
 	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem(), nil
 }
 
@@ -881,7 +891,8 @@ func writeMsgpack(ws *websocket.Conn, msg messageParams) error {
 }
 
 func (c *client) connectionRefused(err error, peerid string, protocol string) {
-	c.writePackedMessage(smsgPeerConnectionRefused, peerid, protocol, err.Error())
+	//c.writePackedMessage(smsgPeerConnectionRefused, peerid, protocol, err.Error())
+	c.writeMsgpack(&smsgPeerConnectionRefusedParams{peerid, protocol, err.Error()})
 }
 
 func (c *client) newConnection(protocol string, peerid string, create func(conID uint64) *connection) {
@@ -944,7 +955,8 @@ func (r *relay) Start(port uint16, pk string) error {
 						case network.ReachabilityPublic:
 							sending = 2
 						}
-						c.writePackedMessage(smsgAccessChange, byte(sending))
+						//c.writePackedMessage(smsgAccessChange, byte(sending))
+						c.writeMsgpack(&smsgAccessChangeParams{sending})
 					}
 				})
 			}

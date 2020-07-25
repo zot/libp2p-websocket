@@ -38,7 +38,7 @@ In this websocket connection, the client and server exchange these commands
 messages, with the first byte of each message identifying the command.
 
 # CLIENT-TO-SERVER MESSAGES
- 
+
 ```
   Start:       [0][KEY: str] -- start peer with optional peer key
   Listen:      [1][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
@@ -78,22 +78,34 @@ This code uses quite a few goroutines and channels. Here is the pattern:
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/gorilla/websocket"
 	"log"
 	"net"
 	"net/http"
+	"reflect"
+	"strconv"
+	"unsafe"
+
+	"github.com/gorilla/websocket"
+	msgpack "github.com/vmihailenco/msgpack/v5"
+
 	//"runtime/debug"
-	"math/rand"
-	"time"
-	"io"
-	"errors"
-	"syscall"
 	"bytes"
+	"errors"
+	"io"
+	"math/rand"
 	"sync/atomic"
+	"syscall"
+	"time"
+
 	"github.com/libp2p/go-libp2p-core/network"
+
+	//msgpack "github.com/vmihailenco/msgpack/v5"
+
+	. "github.com/zot/textcraft-packet"
 )
 
 type messageType byte
+
 const (
 	cmsgStart messageType = iota
 	cmsgListen
@@ -102,10 +114,33 @@ const (
 	cmsgData
 	cmsgConnect
 )
+
+type cmsgStartParams struct {
+	port    int
+	peerKey string
+}
+type cmsgListenStopParams struct {
+	boolParam bool
+	protocol  string
+}
+type cmsgCloseParams struct {
+	conID string
+}
+type cmsgDataParams struct {
+	conID string
+	data  []byte
+}
+type cmsgConnectParams struct {
+	frames bool
+	relay  bool
+	prot   string
+	peerID string
+}
+
 const (
 	smsgHello messageType = iota
 	smsgIdent
-	smsgNewConnection
+	smsgListenerConnection
 	smsgConnectionClosed
 	smsgData
 	smsgListenRefused
@@ -117,21 +152,83 @@ const (
 	smsgAccessChange
 )
 
+type smsgHelloParams struct {
+	started bool
+	version string
+}
+type smsgIdentParams struct {
+	publicPeer     bool
+	peerID         string
+	addresses      []string
+	peerKey        string
+	currentVersion string
+}
+type smsgListenerConnectionParams struct {
+	conID    string
+	peerID   string
+	protocol string
+}
+type smsgConnectionClosedParams struct {
+	conID  string
+	reason string
+}
+type smsgDataParams struct {
+	conID string
+	data  []byte
+}
+type smsgListenRefusedParams struct {
+	prot   string
+	reason string
+}
+type smsgListenerClosedParams struct {
+	prot string
+}
+type smsgPeerConnectionParams struct {
+	conID    string
+	peerID   string
+	protocol string
+}
+type smsgPeerConnectionRefusedParams struct {
+}
+type smsgErrorParams struct {
+	message string
+}
+type smsgListeningParams struct {
+	protocol string
+}
+type smsgAccessChangeParams struct {
+}
+
+type messageParams interface{ msgType() messageType }
+
+func (smsg smsgHelloParams) msgType() messageType                 { return smsgHello }
+func (smsg smsgIdentParams) msgType() messageType                 { return smsgIdent }
+func (smsg smsgListenerConnectionParams) msgType() messageType    { return smsgListenerConnection }
+func (smsg smsgConnectionClosedParams) msgType() messageType      { return smsgConnectionClosed }
+func (smsg smsgDataParams) msgType() messageType                  { return smsgData }
+func (smsg smsgListenRefusedParams) msgType() messageType         { return smsgListenRefused }
+func (smsg smsgListenerClosedParams) msgType() messageType        { return smsgListenerClosed }
+func (smsg smsgPeerConnectionParams) msgType() messageType        { return smsgPeerConnection }
+func (smsg smsgPeerConnectionRefusedParams) msgType() messageType { return smsgPeerConnectionRefused }
+func (smsg smsgErrorParams) msgType() messageType                 { return smsgError }
+func (smsg smsgListeningParams) msgType() messageType             { return smsgListening }
+func (smsg smsgAccessChangeParams) msgType() messageType          { return smsgAccessChange }
+
 var cmsgNames = [...]string{"cmsgStart", "cmsgListen", "cmsgStop", "cmsgClose", "cmsgData", "cmsgConnect"}
 var smsgNames = [...]string{"smsgHello", "smsgIdent", "smsgNewConnection", "smsgConnectionClosed", "smsgData", "smsgListenRefused", "smsgListenerClosed", "smsgPeerConnection", "smsgPeerConnectionRefused", "smsgError", "smsgListening", "smsgAccessChange"}
 
 const (
 	maxMessageSize = 65536 // Maximum websocket message size
-	minPort = 49152
-	maxPort = 65535
-	pongWait = 60 * time.Second
-	pingPeriod = pongWait * 9 / 10
-	verboseSvc = false
+	minPort        = 49152
+	maxPort        = 65535
+	pongWait       = 60 * time.Second
+	pingPeriod     = pongWait * 9 / 10
+	verboseSvc     = false
 	//verboseSvc = true
 )
 
-var frameLength = []byte{0,0,0,0}
-var svcCount int32 = 0
+var frameLength = []byte{0, 0, 0, 0}
+var svcCount int32
 
 var (
 	upgrader = websocket.Upgrader{
@@ -141,6 +238,91 @@ var (
 )
 
 type atomicBoolean int32
+
+func isNum(t reflect.Type) bool {
+	k := t.Kind()
+	return reflect.Int <= k && k <= reflect.Complex128
+}
+
+func marshal(aStruct interface{}) ([]byte, error) {
+	tmpMap := make(map[string]interface{})
+	val := reflect.ValueOf(aStruct)
+	if reflect.Indirect(val) == val {
+		return nil, fmt.Errorf("attempt to call marshall without a pointer")
+	}
+	for {
+		next := reflect.Indirect(val)
+		if val == next {
+			break
+		}
+		val = next
+	}
+	t := val.Type()
+	for i := 0; i < val.NumField(); i++ {
+		ft := t.Field(i)
+		f := val.Field(i)
+		f, err := privateStructValue(t, ft, f)
+		if err != nil {
+			return nil, err
+		}
+		tmpMap[ft.Name] = f.Interface()
+	}
+	return msgpack.Marshal(tmpMap)
+}
+
+func unmarshal(bytes []byte, aStruct interface{}) error {
+	var tmpMap map[string]interface{}
+	errorf := func(msg string, args ...interface{}) error {
+		e := fmt.Errorf(msg, args...)
+		fmt.Println("ERROR:", e.Error())
+		return e
+	}
+
+	err := msgpack.Unmarshal(bytes, &tmpMap)
+	if err != nil {
+		return err
+	}
+	inputValue := reflect.Indirect(reflect.ValueOf(aStruct))
+	if reflect.Indirect(inputValue) == inputValue {
+		return errorf("Attempt to call unmarshall without a pointer")
+	}
+	t := reflect.Indirect(inputValue).Type()
+	fmt.Printf("TYPE: %v\n", t)
+	result := reflect.New(t)
+	newDataValue := reflect.Indirect(result)
+	for k, v := range tmpMap {
+		if sf, present := t.FieldByName(k); present {
+			f, err := privateStructValue(t, sf, newDataValue.FieldByName(k))
+			if err != nil {
+				return err
+			}
+			vValue := reflect.ValueOf(v)
+			if !vValue.Type().AssignableTo(sf.Type) {
+				if !isNum(sf.Type) || !isNum(vValue.Type()) {
+					return fmt.Errorf("bad value for %s.%s: %v", t.Name(), sf.Name, v)
+				}
+				vValue = vValue.Convert(sf.Type)
+			}
+			f.Set(vValue)
+		} else {
+			fmt.Printf("No field %s.%s\n", t.Name(), k)
+		}
+	}
+	inputValue.Set(result)
+	return nil
+}
+
+// thanks to cpcallen at Stackoverflow: https://stackoverflow.com/a/43918797/1026782
+func privateStructValue(t reflect.Type, sf reflect.StructField, field reflect.Value) (reflect.Value, error) {
+	if field.CanSet() {
+		return field, nil
+	}
+	if sf.PkgPath == "" {
+		return field, fmt.Errorf("cannot set %s.%s", t.Name(), sf.Name)
+	}
+	//fmt.Printf("CHECKING PRIVATE FOR %s.%s: %v\n", t.Name(), sf.Name, field.Type())
+	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem(), nil
+}
 
 func (a *atomicBoolean) Get() bool {
 	return atomic.LoadInt32((*int32)(a)) != 0
@@ -159,44 +341,44 @@ type twoWayStream interface {
 	io.Writer
 	io.Closer
 	SetDeadline(time.Time) error
-    SetReadDeadline(time.Time) error
-    SetWriteDeadline(time.Time) error
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
 }
 
 type connection struct {
-	id uint64                                // immutable
-	stream twoWayStream                      // immutable
-	client *client                           // immutable
-	frames bool                              // immutable
-	writeChan chan func()                    // client management
+	id           uint64       // immutable
+	stream       twoWayStream // immutable
+	client       *client      // immutable
+	frames       bool         // immutable
+	writeChan    chan func()  // client management
 	transferChan chan bool
-	readBuf []byte
-	writeBuf []byte
-	name string
-	protocol string
-	data interface{}
+	readBuf      []byte
+	writeBuf     []byte
+	name         string
+	protocol     string
+	data         interface{}
 }
 
 // client allows a browser to use the relay
 type client struct {
 	nextConnectionID uint64
-	control *websocket.Conn                  // the client's control websocket
-	managementChan chan func()               // client management
-	running bool
-	buf []byte
-	transferChan chan bool
-	relay *relay
-	data interface{}
-	ticker *time.Ticker
-	access network.Reachability
+	control          *websocket.Conn // the client's control websocket
+	managementChan   chan func()     // client management
+	running          bool
+	buf              []byte
+	transferChan     chan bool
+	relay            *relay
+	data             interface{}
+	ticker           *time.Ticker
+	access           network.Reachability
 }
 
 type relay struct {
-	clients map[*websocket.Conn]*client      // id -> client
-	managementChan chan func()               // client creation
-	handler protocolHandler
-	peerID string
-	access network.Reachability
+	clients        map[*websocket.Conn]*client // id -> client
+	managementChan chan func()                 // client creation
+	handler        protocolHandler
+	peerID         string
+	access         network.Reachability
 }
 
 type protocolHandler interface {
@@ -214,6 +396,7 @@ type protocolHandler interface {
 	Connect(c *client, protocol string, peerID string, frames bool, relay bool)
 	CleanupClosed(c *connection)
 	AddressesJson() string
+	AddressArray() []string
 	PeerKey() string
 	CloseClient(c *client)
 }
@@ -263,7 +446,7 @@ func svc(s chanSvc, code func()) {
 func runSvc(s chanSvc) {
 	go func() {
 		for {
-			cmd, ok := <- s.getSvcChannel()
+			cmd, ok := <-s.getSvcChannel()
 			if !ok {
 				break
 			}
@@ -275,7 +458,7 @@ func runSvc(s chanSvc) {
 func stringFor(stream twoWayStream) string {
 	if t, ok := stream.(*net.TCPConn); ok {
 		return t.LocalAddr().String() + " -> " + t.RemoteAddr().String()
-	} else if t, ok := stream.(interface {String() string}); ok {
+	} else if t, ok := stream.(interface{ String() string }); ok {
 		return t.String()
 	} else {
 		return "a connection"
@@ -294,11 +477,13 @@ func (c *connection) cleanup() {
 }
 
 func (c *connection) String() string {
-	return c.name + "("+c.protocol+", "+stringFor(c.stream)+")"
+	return c.name + "(" + c.protocol + ", " + stringFor(c.stream) + ")"
 }
 
 func (c *connection) getSvcChannel() chan func() {
-	if verboseSvc {log.Output(3, fmt.Sprintf("GETTING SVC CHANNEL FOR %v", c))}
+	if verboseSvc {
+		log.Output(3, fmt.Sprintf("GETTING SVC CHANNEL FOR %v", c))
+	}
 	return c.writeChan
 }
 
@@ -329,7 +514,7 @@ func (c *connection) writeData(r *relay, data []byte) {
 		}
 		copy(c.writeBuf[offset:], data)
 		c.transferChan <- true // done with data
-		data = c.writeBuf[0:len(data) + offset]
+		data = c.writeBuf[0 : len(data)+offset]
 		for len(data) > 0 {
 			c.stream.SetWriteDeadline(time.Unix(0, 0))
 			len, err := c.stream.Write(data)
@@ -356,7 +541,7 @@ func (c *connection) writeData(r *relay, data []byte) {
 		}
 		fmt.Println("FINISHED WRITING DATA")
 	})
-	<- c.transferChan // wait until done transferring data
+	<-c.transferChan // wait until done transferring data
 }
 
 func (c *connection) close(then func()) {
@@ -385,16 +570,19 @@ func (c *client) getSvcChannel() chan func() {
 
 // write a frame to the client
 func (c *client) receiveFrame(con *connection, buf []byte, err error) {
+	input := make([]byte, len(buf))
+	copy(input, buf)
 	svc(c, func() {
 		if err != nil {
-			fmt.Println("Error reading data from", con, "(", con.id,")", ": ", err.Error())
+			fmt.Println("Error reading data from", con, "(", con.id, ")", ": ", err.Error())
 			c.closeStreamWithMessage(con.id, err.Error())
 		} else {
-			c.writeFullMessage(buf)
+			//c.writeFullMessage(buf)
+			c.writeMsgpack(&smsgDataParams{strconv.FormatUint(con.id, 10), input})
 		}
 		con.transferChan <- true
 	})
-	<- con.transferChan // wait for client to write the buffer out
+	<-con.transferChan // wait for client to write the buffer out
 }
 
 func (c *client) close() {
@@ -411,16 +599,21 @@ func (c *client) assertConnection(conID uint64, test bool, msg string) bool {
 func (c *client) assert(test bool, msg string) bool {
 	if !test {
 		fmt.Println("ERROR: ", msg)
-		c.writePackedMessage(smsgError, msg)
+		c.error(msg)
 	}
 	return test
+}
+
+func (c *client) error(msg string) {
+	c.writeMsgpack(smsgErrorParams{msg})
 }
 
 func (c *client) readWebsocket(r *relay) {
 	fmt.Printf("READING WEB SOCKET")
 	go func() {
-		var err error = nil
-		var data []byte
+		var err error
+		//var data []byte
+		var data []uint8
 		syncChan := make(chan bool)
 
 		for err == nil {
@@ -445,37 +638,48 @@ func (c *client) readWebsocket(r *relay) {
 			}
 			svc(c, func() {
 				if err == nil && len(data) > 0 {
-					fmt.Printf("MSG TYPE: %v\n", messageType(data[0]).clientName())
-					body := data[1:]
-					switch messageType(data[0]) {
-					case cmsgListen:
-						if c.assert(len(body) > 1, "Bad message format for cmsgListen") {
-							r.Listen(c, string(body[1:]), body[0] != 0)
-						}
-					case cmsgStop:
-						if c.assert(len(body) > 1, "Bad message format for cmsgStop") {
-							r.Stop(c, string(body[1:]), body[0] != 0)
+					msgType := messageType(data[0])
+					fmt.Printf("MSG TYPE: %v\n", msgType.clientName())
+					switch msgType {
+					case cmsgListen, cmsgStop:
+						msg := new(cmsgListenStopParams)
+						err = unmarshal(data[1:], &msg)
+						if c.assert(err == nil && len(msg.protocol) > 0, "Bad message format for cmsgListen") {
+							if msgType == cmsgListen {
+								r.Listen(c, msg.protocol, msg.boolParam)
+							} else {
+								r.Stop(c, msg.protocol, msg.boolParam)
+							}
 						}
 					case cmsgClose:
-						if c.assert(len(body) == 8, "Bad message format for cmsgClose") {
-							r.Close(c, binary.BigEndian.Uint64(body[:8]))
+						msg := new(cmsgCloseParams)
+						err = unmarshal(data[1:], &msg)
+						if c.assert(err == nil, "Bad message format for cmsgClose") {
+							id, err := strconv.ParseUint(msg.conID, 10, 64)
+							if err == nil {
+								r.Close(c, id)
+							}
 						}
 					case cmsgData:
-						if c.assert(len(body) > 8, "Bad message format for cmsgData") {
-							r.Data(c, binary.BigEndian.Uint64(body[:8]), body[8:])
+						msg := new(cmsgDataParams)
+						err = unmarshal(data[1:], &msg)
+						if c.assert(err == nil, "Bad message format for cmsgData") {
+							conID, err := strconv.ParseUint(msg.conID, 10, 64)
+							if err == nil {
+								r.Data(c, conID, msg.data)
+							}
 						}
 					case cmsgConnect:
-						if c.assert(len(body) > 4, "Bad message format for cmsgConnect") {
-							frames := body[0] != 0
-							relay := body[1] != 0
-							prot, afterProt := getString(body[2:])
-							peerid := string(afterProt)
-							fmt.Println("Prot:"+prot+", Peer id: "+peerid+", Relay: "+boolString(relay))
-							r.Connect(c, prot, peerid, frames, relay)
+						msg := new(cmsgConnectParams)
+						err = unmarshal(data[1:], &msg)
+						if c.assert(err == nil && len(msg.peerID) > 0, "Bad message format for cmsgConnect") {
+							fmt.Println("Prot:" + msg.prot + ", Peer id: " + msg.peerID + ", Relay: " + boolString(msg.relay))
+							r.Connect(c, msg.prot, msg.peerID, msg.frames, msg.relay)
 						}
 					}
-				} else if err != nil {
-					log.Printf("error: %v\n", err)
+				}
+				if err != nil {
+					panic(fmt.Sprintf("error: %v\n", err))
 				}
 				syncChan <- true
 			})
@@ -493,13 +697,14 @@ func (c *client) putID(conID uint64, offset int) {
 }
 
 func (c *client) closeStreamWithMessage(conID uint64, msg string) {
-	c.writePackedMessage(smsgConnectionClosed, conID, msg)
+	//c.writePackedMessage(smsgConnectionClosed, conID, msg)
+	c.writeMsgpack(&smsgConnectionClosedParams{strconv.FormatUint(conID, 10), msg})
 	c.relay.Close(c, conID)
 }
 
 func (c *client) read(con *connection) {
-	con.readBuf[0] = byte(smsgData)
-	binary.BigEndian.PutUint64(con.readBuf[1:], con.id)
+	//con.readBuf[0] = byte(smsgData)
+	//binary.BigEndian.PutUint64(con.readBuf[1:], con.id)
 	if con.frames {
 		c.readStreamFrames(con)
 	} else {
@@ -510,12 +715,14 @@ func (c *client) read(con *connection) {
 func (c *client) readStreamFrames(con *connection) {
 	fmt.Println("READING CONNECTION:", con.id)
 	go func() {
-		var err error = nil
+		var err error
 
 		for err == nil {
 			len := uint32(0)
-			body := con.readBuf[9:]
-			lenbuf := con.readBuf[9:13]
+			//body := con.readBuf[9:]
+			body := con.readBuf
+			lenbuf := con.readBuf[:4]
+			//lenbuf := con.readBuf[9:13]
 			err = reallyReadFull(con.stream, lenbuf) // read the length
 			if err != nil {
 				fmt.Printf("ERROR READING FRAME LENGTH: %v\n", err)
@@ -525,9 +732,11 @@ func (c *client) readStreamFrames(con *connection) {
 				err = reallyReadFull(con.stream, body[:len])
 			}
 			if err == nil {
-				fmt.Printf("RECEIVED %d BYTES: %X\n", len, con.readBuf[0:9 + len])
+				fmt.Printf("RECEIVED %d BYTES: %X\n", len, con.readBuf[:len])
+				//fmt.Printf("RECEIVED %d BYTES: %X\n", len, con.readBuf[:9+len])
 			}
-			c.receiveFrame(con, con.readBuf[:len + 9], err)
+			c.receiveFrame(con, con.readBuf[:len], err)
+			//c.receiveFrame(con, con.readBuf[:len+9], err)
 		}
 	}()
 }
@@ -559,7 +768,8 @@ func (c *client) readStreamData(con *connection) {
 		var err error
 
 		for err == nil {
-			body := con.readBuf[9:]
+			body := con.readBuf
+			//body := con.readBuf[9:]
 			len, err := con.stream.Read(body)
 			if err != nil {
 				c.receiveFrame(con, con.readBuf, err)
@@ -567,8 +777,10 @@ func (c *client) readStreamData(con *connection) {
 					con.cleanup()
 				})
 			} else {
-				fmt.Printf("RECEIVED %d BYTES: %X\n", len, con.readBuf[0:9 + len])
-				c.receiveFrame(con, con.readBuf[0:9 + len], err)
+				fmt.Printf("RECEIVED %d BYTES: %X\n", len, con.readBuf[0:len])
+				c.receiveFrame(con, con.readBuf[0:len], err)
+				//fmt.Printf("RECEIVED %d BYTES: %X\n", len, con.readBuf[0:9+len])
+				//c.receiveFrame(con, con.readBuf[0:9+len], err)
 			}
 		}
 	}()
@@ -586,7 +798,7 @@ func choosePort() int {
 	//The Internet Assigned Numbers Authority (IANA) suggests the range 49152 to 65535 for dynamic or private ports
 	for {
 		port := (rand.Int() % (maxPort - minPort)) + minPort
-		listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IP{127,0,0,1}, Port: port})
+		listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IP{127, 0, 0, 1}, Port: port})
 		if err == nil {
 			listener.Close()
 			return port
@@ -601,53 +813,13 @@ func choosePort() int {
 
 func getString(data []byte) (string, []byte) {
 	len := binary.BigEndian.Uint16(data)
-	return string(data[2:2+len]), data[2+len:]
+	return string(data[2 : 2+len]), data[2+len:]
 }
 
 func putString(buf []byte, str string) []byte {
 	binary.BigEndian.PutUint16(buf, uint16(len(str)))
 	copy(buf[2:], str)
-	return buf[2 + len(str):]
-}
-
-/*
- * pack data into a message, handling these types:
- *   string
- *   []byte
- *   byte
- *   uint32
- *   uint64
- */
-func pack(typ messageType, items ...interface{}) []byte {
-	buf := bytes.NewBuffer(make([]byte, 0, 16))
-	buf.WriteByte(byte(typ))
-	for i, item := range items {
-		switch item.(type) {
-		case bool:
-			if item.(bool) {
-				buf.WriteByte(1)
-			} else {
-				buf.WriteByte(0)
-			}
-		case byte:
-			buf.WriteByte(item.(byte))
-		case []byte:
-			buf.Write(item.([]byte))
-		case string:
-			str := item.(string)
-			if i + 1 < len(items) {
-				binary.Write(buf, binary.BigEndian, uint16(len(str)))
-			}
-			buf.Write([]byte(str))
-		case uint32:
-			binary.Write(buf, binary.BigEndian, item.(uint32))
-		case uint64:
-			binary.Write(buf, binary.BigEndian, item.(uint64))
-		default:
-			log.Fatal(fmt.Sprintf("ERROR! Attempt to pack unsupport data: %#v", item))
-		}
-	}
-	return buf.Bytes()
+	return buf[2+len(str):]
 }
 
 func (c *client) writeMessage(typ messageType, body []byte) error {
@@ -656,36 +828,78 @@ func (c *client) writeMessage(typ messageType, body []byte) error {
 
 func (c *client) writePackedMessage(typ messageType, items ...interface{}) error {
 	fmt.Println(append(array("WRITING", typ.serverName(), "MESSAGE"), items...)...)
-	return c.writeFullMessage(pack(typ, items...))
+	return c.writeFullMessage(Pack1(byte(typ), items...))
 }
 
 func (c *client) writeFullMessage(msg []byte) error {
-	fmt.Printf("@@@ Writing message type %v\n", messageType(msg[0]).serverName())
-	if c.control == nil {
-		return fmt.Errorf("Connection closed")
-	}
-	werr := c.control.WriteMessage(websocket.BinaryMessage, msg)
-	if werr != nil {
+	return c.closeOnError(func() error {
+		fmt.Printf("@@@ Writing message type %v\n", messageType(msg[0]).serverName())
+		if c.control == nil {
+			return fmt.Errorf("Connection closed")
+		}
+		return c.control.WriteMessage(websocket.BinaryMessage, msg)
+	})
+}
+
+func (c *client) writeMsgpack(msg messageParams) error {
+	return c.closeOnError(func() error {
+		return writeMsgpack(c.control, msg)
+	})
+}
+
+func (c *client) closeOnError(code func() error) error {
+	var err error
+
+	func() { // nested here so defer can properly reassign err
+		defer func() {
+			if x := recover(); x != nil && err == nil {
+				if _, ok := x.(error); ok {
+					err = x.(error) // this value of err will be available *after* the function exits
+				}
+			}
+		}()
+
+		err = code()
+	}()
+	if err != nil { // if func's deferred code assigned err, the value will be here
 		svc(c, func() {
 			c.close()
 		})
 	}
-	return werr
+	return err
+}
+
+func writeMsgpack(ws *websocket.Conn, msg messageParams) error {
+	data, err := marshal(msg)
+	if err == nil {
+		packet := make([]byte, len(data)+1)
+		packet[0] = byte(msg.msgType())
+		copy(packet[1:], data)
+		err = ws.WriteMessage(websocket.BinaryMessage, packet)
+	}
+	return err
 }
 
 func (c *client) connectionRefused(err error, peerid string, protocol string) {
 	c.writePackedMessage(smsgPeerConnectionRefused, peerid, protocol, err.Error())
 }
 
-func (c *client) newConnection(conType messageType, protocol string, peerid string, create func(conID uint64) *connection) {
+func (c *client) newConnection(protocol string, peerid string, create func(conID uint64) *connection) {
 	id := c.newConnectionID()
 	c.read(create(id))
-	c.writePackedMessage(conType, id, peerid, protocol)
+	c.writeMsgpack(&smsgPeerConnectionParams{strconv.FormatUint(id, 10), peerid, protocol})
+	//c.writePackedMessage(conType, id, peerid, protocol)
 }
+
+//func (c *client) newConnection(conType messageType, protocol string, peerid string, create func(conID uint64) *connection) {
+//	id := c.newConnectionID()
+//	c.read(create(id))
+//	c.writePackedMessage(conType, id, peerid, protocol)
+//}
 
 func (c *client) checkProtocolErr(err error, typ messageType) {
 	if err != nil {
-		c.writePackedMessage(smsgError, fmt.Sprintf("Bad message format for %v", typ.clientName()))
+		c.error(fmt.Sprintf("Bad message format for %v", typ.clientName()))
 		c.close()
 	}
 }
@@ -703,10 +917,12 @@ func (r *relay) Started() bool {
 }
 
 func (r *relay) Start(port uint16, pk string) error {
-	if err := r.handler.Start(port, pk); err != nil {return err}
+	if err := r.handler.Start(port, pk); err != nil {
+		return err
+	}
 	go func() {
 		for {
-			status := <- r.handler.PeerAccess()
+			status := <-r.handler.PeerAccess()
 			switch status {
 			case network.ReachabilityUnknown:
 				fmt.Printf("@@@@@ RECEIVED ACCESS CHANGED TO UNKNOWN\n")
@@ -804,7 +1020,8 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 					return nil
 				})
 				if alreadyConnected != nil {
-					con.WriteMessage(websocket.BinaryMessage, pack(smsgError, "There is already a connection"))
+					//con.WriteMessage(websocket.BinaryMessage, Pack(byte(smsgError), "There is already a connection"))
+					writeMsgpack(con, &smsgErrorParams{"There is already a connection"})
 					con.Close()
 					return
 				}
@@ -812,7 +1029,7 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 			started := r.Started()
 			//fmt.Println("SENDING HELLO")
 			v, _ := r.Versions()
-			err := con.WriteMessage(websocket.BinaryMessage, pack(smsgHello, started, v))
+			err := writeMsgpack(con, &smsgHelloParams{started, v})
 			if err != nil {
 				log.Printf("Error writing initial message: %v\n", err)
 				con.Close()
@@ -838,10 +1055,16 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 						con.Close()
 					}
 					if messageType(data[0]) == cmsgStart {
-						port := uint16(data[1]) << 8 + uint16(data[2])
-						err := r.Start(port, string(data[3:]))
+						msg := new(cmsgStartParams)
+						err := unmarshal(data[1:], &msg)
 						if err != nil {
-							fmt.Println("ERROR, BAD PORT:", port)
+							fmt.Println("BAD START MESSAGE")
+							con.Close()
+							return
+						}
+						err = r.Start(uint16(msg.port), msg.peerKey)
+						if err != nil {
+							fmt.Println("ERROR, BAD PORT:", msg.port)
 							con.Close()
 						} else {
 							r.runProtocol(con)
@@ -875,7 +1098,7 @@ func (r *relay) runProtocol(con *websocket.Conn) {
 			defer client.ticker.Stop()
 			for !done.Get() {
 				select {
-				case _, ok := <- client.ticker.C:
+				case _, ok := <-client.ticker.C:
 					if ok {
 						svc(client, func() {
 							if err := con.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -892,7 +1115,8 @@ func (r *relay) runProtocol(con *websocket.Conn) {
 		// start the client, send ident message when ready
 		r.StartClient(client, func(public bool) {
 			_, v2 := r.Versions()
-			client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson(), r.handler.PeerKey(), v2)
+			//client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson(), r.handler.PeerKey(), v2)
+			client.writeMsgpack(&smsgIdentParams{public, r.peerID, r.handler.AddressArray(), r.handler.PeerKey(), v2})
 			runSvc(client)
 			client.readWebsocket(r)
 		})

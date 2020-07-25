@@ -25,31 +25,43 @@
 package main
 
 import (
-	"os"
 	"context"
+	"encoding/ascii85"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"net/http"
-	"path/filepath"
 	"log"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"strings"
-	"encoding/ascii85"
-	"encoding/json"
+
+	//"encoding/binary"
 	"bytes"
 	"io/ioutil"
 	"strconv"
 
+	ipfslite "github.com/hsanjuan/ipfs-lite"
+	"github.com/ipfs/go-cid"
+	ipfsconfig "github.com/ipfs/go-ipfs-config"
 	"github.com/libp2p/go-libp2p"
-	"github.com/libp2p/go-libp2p-core/network"
-	"github.com/libp2p/go-libp2p-core/peer"
+	connmgr "github.com/libp2p/go-libp2p-connmgr"
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/host"
+	"github.com/libp2p/go-libp2p-core/network"
+	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/protocol"
-	"github.com/libp2p/go-libp2p-discovery"
+	discovery "github.com/libp2p/go-libp2p-discovery"
+	dualdht "github.com/libp2p/go-libp2p-kad-dht/dual"
+	secio "github.com/libp2p/go-libp2p-secio"
+	libp2ptls "github.com/libp2p/go-libp2p-tls"
+	nat "github.com/libp2p/go-nat"
+
 	//basicHost "github.com/libp2p/go-libp2p/p2p/host/basic"
 	//circuit "github.com/libp2p/go-libp2p-circuit"
 	//rly "github.com/libp2p/go-libp2p/p2p/host/relay"
@@ -59,15 +71,17 @@ import (
 	//pb "github.com/libp2p/go-libp2p-pubsub/pb"
 
 	//dht "github.com/libp2p/go-libp2p-kad-dht"
-	multiaddr "github.com/multiformats/go-multiaddr"
+	ma "github.com/multiformats/go-multiaddr"
 	//logging "github.com/whyrusleeping/go-logging"
 
 	goLog "github.com/ipfs/go-log"
 	log2 "github.com/ipfs/go-log/v2"
+
 	//"github.com/mr-tron/base58/base58"
-	autonatSvc "github.com/libp2p/go-libp2p-autonat-svc"
+	//autonatSvc "github.com/libp2p/go-libp2p-autonat-svc"
 
 	"github.com/pkg/browser"
+	//blockreq "github.com/zot/textcraft-blockrequest"
 )
 
 /*
@@ -78,7 +92,7 @@ import (
  * Some of these parts still survive in the code :)
  */
 
-type addrList []multiaddr.Multiaddr
+type addrList []ma.Multiaddr
 
 type fileList []string
 
@@ -86,19 +100,19 @@ type retryError string
 
 type libp2pRelay struct {
 	relay
-	host host.Host
-	discovery *discovery.RoutingDiscovery
-	natStatus network.Reachability
-	natActions []func()                          // defer these until nat status known
-	connectedPeers map[peer.ID]*libp2pConnection // connected peers
+	host            host.Host
+	discovery       *discovery.RoutingDiscovery
+	natStatus       network.Reachability
+	natActions      []func()                      // defer these until nat status known
+	connectedPeers  map[peer.ID]*libp2pConnection // connected peers
 	externalAddress string
 }
 
 type libp2pClient struct {
 	client
-	listeners map[string]*listener           // protocol -> listener
-	listenerConnections map[uint64]*listener // connectionID -> listener
-	forwarders map[uint64]*libp2pConnection  // connectionID -> forwarder
+	listeners           map[string]*listener         // protocol -> listener
+	listenerConnections map[uint64]*listener         // connectionID -> listener
+	forwarders          map[uint64]*libp2pConnection // connectionID -> forwarder
 }
 
 type libp2pConnection struct {
@@ -107,14 +121,23 @@ type libp2pConnection struct {
 }
 
 type listener struct {
-	client *libp2pClient                     // the client that owns this listener
-	connections map[uint64]*libp2pConnection // connectionID -> connection
-	protocol string
-	frames bool                              // whether to transmit frame lengths
-	managementChan chan func()               // client management
-	closed bool
+	client         *libp2pClient                // the client that owns this listener
+	connections    map[uint64]*libp2pConnection // connectionID -> connection
+	protocol       string
+	frames         bool        // whether to transmit frame lengths
+	managementChan chan func() // client management
+	closed         bool
 }
 
+const (
+	portMapLeaseTime = 10 * time.Second // must be larger than 5 seconds
+)
+
+var test = ""
+var decodeHash = ""
+var p2pPort = 0
+var useIPFSLite = true
+var configDir = ""
 var singleConnectionOpt = ""
 var singleConnection = singleConnectionOpt == "true"
 var versionCheckURL = ""
@@ -207,12 +230,15 @@ func (r *libp2pRelay) CloseClient(c *client) {
 }
 
 // LISTEN API METHOD
-func (r *libp2pRelay) Listen(c *client, prot string, frames bool) {
-	r.listen(smsgListening, smsgNewConnection, r.libp2pClient(c), prot, frames, nil)
-}
-
-func (r *libp2pRelay) listen(announceMsg messageType, msgType messageType, c *libp2pClient, prot string, frames bool, connect func(*libp2pConnection)) *listener {
+func (r *libp2pRelay) Listen(cl *client, prot string, frames bool) {
+	c := r.libp2pClient(cl)
 	lis := c.createListener(prot, frames)
+	for _, currentProt := range r.host.Mux().Protocols() {
+		if currentProt == prot {
+			c.writeMsgpack(&smsgListenRefusedParams{prot, "already listening to " + prot})
+			return
+		}
+	}
 	fmt.Println("listen, protocol: ", prot, ", frames: ", frames)
 	r.host.SetStreamHandler(protocol.ID(prot), func(stream network.Stream) {
 		fmt.Println("GOT A CONNECTION")
@@ -221,15 +247,13 @@ func (r *libp2pRelay) listen(announceMsg messageType, msgType messageType, c *li
 			fmt.Printf("GOT DIRECT CONNECTION ON %s FROM %s\n", prot, stream.Conn().RemotePeer().Pretty())
 			lis.connections[con.id] = con
 			c.listenerConnections[con.id] = lis
-			c.writePackedMessage(msgType, con.id, stream.Conn().RemotePeer().Pretty(), prot)
+			//c.writePackedMessage(smsgListenerConnection, con.id, stream.Conn().RemotePeer().Pretty(), prot)
+			c.writeMsgpack(&smsgListenerConnectionParams{strconv.FormatUint(con.id, 10), stream.Conn().RemotePeer().Pretty(), prot})
 			c.read(&con.connection)
-			if connect != nil {
-				connect(con)
-			}
 		})
 	})
-	c.writePackedMessage(announceMsg, prot)
-	return lis
+	//c.writePackedMessage(smsgListening, prot)
+	c.writeMsgpack(&smsgListeningParams{prot})
 }
 
 // STOP LISTENER API METHOD
@@ -252,11 +276,16 @@ func (r *libp2pRelay) Started() bool {
 func (r *libp2pRelay) Start(port uint16, pk string) error {
 	peerKey = pk
 	fmt.Println("STARTING RELAY...")
-	if (port != 0) {
-		addrs, err := StringsToAddrs([]string{fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port)})
-		if err != nil {return err}
-		listenAddresses = addrs
+	if port != 0 {
+		p2pPort = int(port)
+	} else {
+		p2pPort = 4005
 	}
+	addrs, err := StringsToAddrs([]string{fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", p2pPort)})
+	if err != nil {
+		return err
+	}
+	listenAddresses = addrs
 	initp2p()
 	fmt.Println("STARTED")
 	return nil
@@ -323,7 +352,8 @@ func (r *libp2pRelay) Data(c *client, id uint64, data []byte) {
 		con.writeData(&r.relay, data)
 	} else {
 		fmt.Println("@@@ WRITING DATA TO CONNECTION")
-		c.writePackedMessage(smsgConnectionClosed, id, "unknown connection")
+		//c.writePackedMessage(smsgConnectionClosed, id, "unknown connection")
+		c.writeMsgpack(&smsgConnectionClosedParams{strconv.FormatUint(id, 10), "unknown connection"})
 	}
 }
 
@@ -331,7 +361,7 @@ func (r *libp2pRelay) Data(c *client, id uint64, data []byte) {
 func (r *libp2pRelay) Connect(c *client, prot string, peerid string, frames bool, relay bool) {
 	type addrs struct {
 		PeerID string
-		Addrs []string // the addrs of the peer
+		Addrs  []string // the addrs of the peer
 	}
 	//var encodedAddrs addrs
 	encodedAddrs := new(addrs)
@@ -347,23 +377,23 @@ func (r *libp2pRelay) Connect(c *client, prot string, peerid string, frames bool
 		ndst, _, err := ascii85.Decode(dst, []byte(enc), true)
 		fmt.Println("Decoded", ndst, "bytes, len(dst) =", len(dst))
 		if err != nil {
-			c.connectionRefused(fmt.Errorf("Could not decode addrs: %s\n", peerid), peerid, prot)
+			c.connectionRefused(fmt.Errorf("could not decode addrs: %s", peerid), peerid, prot)
 			return
 		}
 		fmt.Println("Decoding", string(dst[:ndst]))
 		err = json.Unmarshal(dst[:ndst], encodedAddrs)
 		if err != nil {
-			c.connectionRefused(fmt.Errorf("Could not decode addrs: %s\n", string(dst[:ndst])), peerid, prot)
+			c.connectionRefused(fmt.Errorf("could not decode addrs: %s", string(dst[:ndst])), peerid, prot)
 			return
 		}
 		peerid = encodedAddrs.PeerID
 		fmt.Println("Peer ID:", peerid)
 		fmt.Printf("Addrs: %#v\n", encodedAddrs)
-		addrInfo.Addrs = make([]multiaddr.Multiaddr, len(encodedAddrs.Addrs))
+		addrInfo.Addrs = make([]ma.Multiaddr, len(encodedAddrs.Addrs))
 		for i, addr := range encodedAddrs.Addrs {
-			ma, err := multiaddr.NewMultiaddr(addr)
+			ma, err := ma.NewMultiaddr(addr)
 			if err != nil {
-				c.connectionRefused(fmt.Errorf("Could not decode peer addr: %s\n", addr), peerid, prot)
+				c.connectionRefused(fmt.Errorf("could not decode peer addr: %s", addr), peerid, prot)
 				return
 			}
 			addrInfo.Addrs[i] = ma
@@ -377,17 +407,17 @@ func (r *libp2pRelay) Connect(c *client, prot string, peerid string, frames bool
 	addrInfo.ID = pid
 	if encodedAddrs.PeerID == "" {
 		fmt.Printf("Attempting to connect peer %s\n", pid.Pretty())
-		maddr, err := multiaddr.NewMultiaddr("/p2p/"+peerid)
+		maddr, err := ma.NewMultiaddr("/p2p/" + peerid)
 		if err != nil {
-			c.connectionRefused(fmt.Errorf("Could not parse multiaddr %s\n", "/p2p/"+peerid), pid.Pretty(), prot)
+			c.connectionRefused(fmt.Errorf("could not parse multiaddr %s", "/p2p/"+peerid), pid.Pretty(), prot)
 			return
 		}
 		addrInfo.ID = pid
-		addrInfo.Addrs = []multiaddr.Multiaddr{maddr}
+		addrInfo.Addrs = []ma.Multiaddr{maddr}
 	}
 	err = r.host.Connect(context.Background(), addrInfo)
 	if err != nil {
-		c.connectionRefused(fmt.Errorf("Could not connect to peer %s: %s\n", pid.Pretty(), err.Error()), pid.Pretty(), prot)
+		c.connectionRefused(fmt.Errorf("could not connect to peer %s: %s", pid.Pretty(), err.Error()), pid.Pretty(), prot)
 		return
 	}
 	fmt.Printf("Attempting to connect with protocol %v to peer %v with%s relay\n", prot, peerid, relayMsg)
@@ -401,7 +431,8 @@ func (r *libp2pRelay) Connect(c *client, prot string, peerid string, frames bool
 		}
 		fmt.Println("Connected")
 		lc := r.libp2pClient(c)
-		c.newConnection(smsgPeerConnection, prot, stream.Conn().RemotePeer().Pretty(), func(conID uint64) *connection {
+		//c.newConnection(smsgPeerConnection, prot, stream.Conn().RemotePeer().Pretty(), func(conID uint64) *connection {
+		c.newConnection(prot, stream.Conn().RemotePeer().Pretty(), func(conID uint64) *connection {
 			con := lc.createConnection(conID, prot, stream, frames)
 			lc.forwarders[conID] = con
 			return &con.connection
@@ -416,9 +447,20 @@ func logLine(str string, items ...interface{}) {
 
 func (r *libp2pRelay) printAddresses() {
 	fmt.Println("Addresses:")
-	for _, addr := range r.host.Addrs() {
-		fmt.Println("   ", addr.String()+"/p2p/"+r.peerID)
+	printMaddrs(r.host.Addrs(), "/p2p/"+r.peerID)
+}
+func printMaddrs(addrs []ma.Multiaddr, suffix string) {
+	for _, addr := range addrs {
+		fmt.Println("   ", addr.String()+suffix)
 	}
+}
+
+func (r *libp2pRelay) AddressArray() []string {
+	output := make([]string, 0, len(r.host.Addrs()))
+	for _, addr := range r.host.Addrs() {
+		output = append(output, addr.String())
+	}
+	return output
 }
 
 func (r *libp2pRelay) AddressesJson() string {
@@ -464,15 +506,16 @@ func (l *listener) close(retainConnections bool) {
 	for id := range l.connections {
 		l.removeConnection(id, retainConnections)
 	}
-	l.client.writePackedMessage(smsgListenerClosed, l.protocol)
+	//l.client.writePackedMessage(smsgListenerClosed, l.protocol)
+	l.client.writeMsgpack(&smsgListenerClosedParams{l.protocol})
 	l.closePrim()
 }
 
 func (l *listener) closePrim() {
 	l.client.libp2pRelay().host.RemoveStreamHandler(protocol.ID(l.protocol))
 	delete(l.client.listeners, l.protocol)
-	for conId, _ := range l.connections {
-		delete(l.client.listenerConnections, conId)
+	for conID := range l.connections {
+		delete(l.client.listenerConnections, conID)
 	}
 	l.closed = true
 }
@@ -509,7 +552,7 @@ func (c *libp2pClient) Close() {
 			l.close(false)
 		}
 		for _, con := range c.forwarders {
-			con.close(func(){})
+			con.close(func() {})
 		}
 		if c.control != nil {
 			c.control.Close()
@@ -528,7 +571,8 @@ func (c *libp2pClient) createConnection(conID uint64, prot string, stream networ
 	con.peerID = stream.Conn().RemotePeer()
 	con.connection.init("connection", prot, conID, stream, &c.client, frames, con)
 	fmt.Println("MAKING CONNECTION WITH ID ", con.id)
-	svc(c.relay, func(){c.libp2pRelay().connectedPeers[con.peerID] = con})
+	getLibp2pRelay(c.relay).host.ConnManager().Protect(con.peerID, "textcraft")
+	svc(c.relay, func() { c.libp2pRelay().connectedPeers[con.peerID] = con })
 	return con
 }
 
@@ -559,17 +603,17 @@ func checkErr(err error) {
 }
 
 func checkVersion() {
-	if (versionCheckURL != "" && centralRelay.peerID != "") {
+	if versionCheckURL != "" && centralRelay.peerID != "" {
 		fmt.Println("This version:", versionID)
 		seconds, nanos := versionNumbers(versionID)
 		fmt.Println("FETCHING", fmt.Sprintf(versionCheckURL, centralRelay.peerID, seconds, nanos))
 		resp, err := http.Get(fmt.Sprintf(versionCheckURL, centralRelay.peerID, seconds, nanos))
-		if (err != nil) {
+		if err != nil {
 			fmt.Println("Error: ", err.Error())
 		} else {
 			defer resp.Body.Close()
 			body, err := ioutil.ReadAll(resp.Body)
-			if (err != nil) {
+			if err != nil {
 				fmt.Println("Error: ", err.Error())
 			} else {
 				curVersionID = strings.TrimSpace(string(body))
@@ -580,114 +624,249 @@ func checkVersion() {
 }
 
 func initp2p() {
+	var key crypto.PrivKey
+	var keyBytes []byte
+	var err error
+	var opts []libp2p.Option
+	var myHost host.Host
+	var lite *ipfslite.Peer
+	var dht *dualdht.DHT
+
 	started = true
 	goLog.SetAllLoggers(log2.LevelWarn)
 	goLog.SetLogLevel("rendezvous", "info")
 	ctx := context.Background()
-	opts := []libp2p.Option{
-		libp2p.NATPortMap(),
-		libp2p.ListenAddrs([]multiaddr.Multiaddr(listenAddresses)...),
+	if useIPFSLite {
+		//opts = ipfslite.Libp2pOptionsExtra
+		opts = []libp2p.Option{
+			//libp2p.NATPortMap(), //
+			libp2p.ConnectionManager(connmgr.NewConnManager(50, 300, time.Minute)),
+			libp2p.EnableAutoRelay(),
+			//libp2p.EnableNATService(), //
+			libp2p.Security(libp2ptls.ID, libp2ptls.New),
+			libp2p.Security(secio.ID, secio.New),
+			libp2p.DefaultTransports,
+		}
+		if peerKey == "" {
+			key, _, err = crypto.GenerateKeyPair(crypto.RSA, 2048)
+			fmt.Println("   ###   ADDING PEER KEY")
+		}
+	} else {
+		opts = []libp2p.Option{
+			libp2p.NATPortMap(),
+			libp2p.EnableNATService(),
+			libp2p.ListenAddrs([]ma.Multiaddr(listenAddresses)...),
+		}
 	}
 	if peerKey != "" { // add peer key into opts if provided
-		keyBytes, err := crypto.ConfigDecodeKey(peerKey)
+		keyBytes, err = crypto.ConfigDecodeKey(peerKey)
 		checkErr(err)
-		key, err := crypto.UnmarshalPrivateKey(keyBytes)
-		opts = append(opts, libp2p.Identity(key))
+		key, err = crypto.UnmarshalPrivateKey(keyBytes)
+		checkErr(err)
+		fmt.Println("   ###   ADDING PEER KEY")
+		if !useIPFSLite {
+			opts = append(opts, libp2p.Identity(key))
+		}
 	}
 	if fakeNatStatus == "public" {
 		opts = append(opts, libp2p.ForceReachabilityPublic())
 	} else if fakeNatStatus == "private" {
 		opts = append(opts, libp2p.ForceReachabilityPrivate())
 	}
+	fmt.Printf("%+v\n", opts)
 	fakeNatStatus = ""
-	myHost, err := libp2p.New(ctx, opts...)
+
+	mapping := <-mapPort(context.Background(), p2pPort)
+	if mapping.err == nil {
+		var addr ma.Multiaddr
+		addrStr := mapping.addr.IP.String() + "/tcp/" + strconv.Itoa(mapping.addr.Port)
+
+		fmt.Printf("IP:%v[%d]\n", mapping.addr.IP, len(strings.Split(mapping.addr.IP.String(), ".")))
+		if len(strings.Split(mapping.addr.IP.String(), ".")) == 4 {
+			addr, err = ma.NewMultiaddr("/ip4/" + addrStr)
+		} else {
+			addr, err = ma.NewMultiaddr("/ip6/" + addrStr)
+		}
+		if err == nil {
+			opts = append(opts, libp2p.AddrsFactory(func(addrs []ma.Multiaddr) []ma.Multiaddr {
+				proto := ma.P_IP4
+				addrStr, err := addr.ValueForProtocol(proto)
+				ipv4 := err == nil
+				var tmpStr string
+
+				if !ipv4 {
+					proto = ma.P_IP6
+					addrStr, err = addr.ValueForProtocol(proto)
+					if err != nil {
+						return addrs
+					}
+				}
+				for i, tmpAddr := range addrs {
+					if tmpStr, err = tmpAddr.ValueForProtocol(proto); err == nil && tmpStr == addrStr {
+						addrs[i] = addr
+						return addrs
+					}
+				}
+				return append(addrs, addr)
+			}))
+		}
+	}
+	if useIPFSLite {
+		ipfsDir, err := ipfsconfig.Filename("")
+		checkErr(err)
+		path := filepath.Join(filepath.Dir(ipfsDir), configDir)
+		fmt.Println("DATA STORE:", path)
+		if _, err = os.Stat(path); err != nil {
+			parent := filepath.Dir(path)
+			_, err = os.Stat(parent)
+			if err != nil {
+				grandParent := filepath.Dir(parent)
+				_, err = os.Stat(grandParent)
+				if err != nil {
+					fmt.Println("\n\nCOULD NOT CREATE CONFIG DIRECTORY:", path, "\n\n")
+					panic(err)
+				}
+				err = os.Mkdir(parent, 0700)
+				if err != nil {
+					fmt.Println("\n\nCOULD NOT CREATE CONFIG DIRECTORY PARENT:", parent, "\n\n")
+					panic(err)
+				}
+			}
+			err = os.Mkdir(path, 0700)
+			checkErr(err)
+		}
+		fmt.Println("Datastore:", string(path))
+		ds, err := ipfslite.BadgerDatastore(path)
+		fmt.Println("Listen addresses:")
+		printMaddrs(listenAddresses, "")
+		myHost, dht, err = ipfslite.SetupLibp2p(
+			ctx,
+			key,
+			nil,
+			listenAddresses,
+			ds,
+			opts...,
+		)
+		checkErr(err)
+		lite, err = ipfslite.New(ctx, ds, myHost, dht, nil)
+	} else {
+		myHost, err = libp2p.New(ctx, opts...)
+	}
 	checkErr(err)
-	logger.Info("Host created. We are:", myHost.ID())
-	logger.Info(myHost.Addrs())
 	fmt.Println("Addrs:", myHost.Addrs())
 	centralRelay.peerID = myHost.ID().Pretty()
 	centralRelay.host = myHost
-
 	checkVersion()
 	if fakeNatStatus == "public" {
 		centralRelay.setNATStatus(network.ReachabilityPublic)
 	} else if fakeNatStatus == "private" {
-
 		centralRelay.setNATStatus(network.ReachabilityPrivate)
 	} else {
 		/// MONITOR NAT STATUS
 		fmt.Println("Creating autonat")
-		an, err := autonat.New(context.Background(), myHost)
+		//ctx, cancel := context.WithCancel(context.Background())
+		ctx := context.Background()
+		an, err := autonat.New(ctx, myHost)
 		checkErr(err)
 		centralRelay.natStatus = network.ReachabilityUnknown
 		go func() {
 			peeped := false
-			for {
-				status := an.Status()
-				svcSync(centralRelay, func() interface{} {
-					if status != centralRelay.natStatus || !peeped {
-						switch status {
-						case network.ReachabilityUnknown:
-							fmt.Println("@@@ NAT status UNKNOWN")
+			timer := time.NewTimer(0)
+
+			for running := true; running; {
+				timer.Reset(1 * time.Second) // check autonat every second until it finds status
+				select {
+				case <-timer.C:
+					status := an.Status()
+					svcSync(centralRelay, func() interface{} {
+						if status != centralRelay.natStatus || !peeped {
+							fmt.Println("@@@ NAT status", natStatus(status))
 							addr, err := an.PublicAddr()
 							if err == nil {
 								fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
 								centralRelay.printAddresses()
 							}
-						case network.ReachabilityPublic:
-							fmt.Println("@@@ NAT status PUBLIC")
-							addr, err := an.PublicAddr()
-							if err == nil {
-								fmt.Println("@@@ PUBLIC ADDRESS: ", addr)
-								centralRelay.printAddresses()
+							if status != network.ReachabilityUnknown {
+								centralRelay.setNATStatus(status)
 							}
-						case network.ReachabilityPrivate:
-							fmt.Println("@@@ NAT status PRIVATE")
+							accessChan <- status
 						}
-						if status != network.ReachabilityUnknown {
-							centralRelay.setNATStatus(status)
-						}
-						accessChan <- status
-					}
-					return nil
-				})
-				peeped = true
-				time.Sleep(250 * time.Millisecond)
+						return nil
+					})
+					peeped = true
+				}
 			}
 		}()
-		autonatSvc.NewAutoNATService(context.Background(), myHost)
+		//autonatSvc.NewAutoNATService(ctx, myHost)
 	}
-	key := myHost.Peerstore().PrivKey(myHost.ID())
-	keyBytes, err := crypto.MarshalPrivateKey(key)
+	key = myHost.Peerstore().PrivKey(myHost.ID())
+	keyBytes, err = crypto.MarshalPrivateKey(key)
 	checkErr(err)
 	peerKey = crypto.ConfigEncodeKey(keyBytes)
 	fmt.Printf("host private %s key: %s\n", reflect.TypeOf(key), peerKey)
 
-	// Let's connect to the bootstrap nodes first. They will tell us about the
-	// other nodes in the network.
-	var wg sync.WaitGroup
-	var remaining int32 = int32(len(bootstrapPeers))
-	fmt.Printf("@@@ WAITING FOR %d bootstrap peer connections...\n", remaining)
-	for _, peerAddr := range bootstrapPeers {
-		peerinfo, err := peer.AddrInfoFromP2pAddr(peerAddr)
-		if err != nil {continue}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := myHost.Connect(ctx, *peerinfo); err != nil {
-				logger.Warning(err)
-			} else {
-				logger.Info("Connection established with bootstrap node:", *peerinfo)
+	if useIPFSLite {
+		lite.Bootstrap(ipfslite.DefaultBootstrapPeers())
+	} else {
+		// Let's connect to the bootstrap nodes first. They will tell us about the
+		// other nodes in the network.
+		var wg sync.WaitGroup
+		remaining := int32(len(bootstrapPeers))
+
+		fmt.Printf("@@@ WAITING FOR %d bootstrap peer connections...\n", remaining)
+		for _, peerAddr := range bootstrapPeers {
+			peerinfo, err := peer.AddrInfoFromP2pAddr(peerAddr)
+			if err != nil {
+				continue
 			}
-			rem := atomic.AddInt32(&remaining, -1)
-			fmt.Printf("@@@ WAITING FOR %d bootstrap peer connections...\n", rem)
-		}()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := myHost.Connect(ctx, *peerinfo); err != nil {
+					logger.Warning(err)
+				} else {
+					logger.Info("Connection established with bootstrap node:", *peerinfo)
+				}
+				rem := atomic.AddInt32(&remaining, -1)
+				fmt.Printf("@@@ WAITING FOR %d bootstrap peer connections...\n", rem)
+			}()
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 	centralRelay.printAddresses()
 	fmt.Println("FINISHED INITIALIZING P2P, CREATING RELAY")
 	runSvc(centralRelay)
 	fmt.Printf("Peer id: %v\n", centralRelay.peerID)
+	if decodeHash != "" && useIPFSLite {
+		///// fetch the node, try using ipld.Decode(NewBlock(node.RawData())) to make a node
+		location := "local"
+		cid, err := cid.Decode(decodeHash)
+		checkErr(err)
+		fmt.Printf("CID: %v\n", cid)
+		block, err := lite.BlockStore().Get(cid)
+		if block == nil {
+			location = "remote"
+			block, err = lite.Session(context.Background()).Get(context.Background(), cid)
+			checkErr(err)
+		}
+		fmt.Printf("Block [%s]: %v\n", location, block)
+	}
+	//	if test != "" {
+	//		blockreq.InitBlockProtocol("textcraft-request", dht, ds, make(map[peer.ID]peer.ID, host, 10000))
+	//	}
+}
+
+func natStatus(status network.Reachability) string {
+	switch status {
+	case network.ReachabilityUnknown:
+		return "UNKNOWN"
+	case network.ReachabilityPublic:
+		return "PUBLIC"
+	case network.ReachabilityPrivate:
+		return "PRIVATE"
+	default:
+		return "BAD NETWORK STATUS"
+	}
 }
 
 func versionNumbers(v string) (string, string) {
@@ -695,16 +874,22 @@ func versionNumbers(v string) (string, string) {
 	times := strings.Split(v, ".")
 	seconds := times[0]
 	nanos := times[1]
-	return seconds, strings.Repeat("0", len(nanos) - 9) + nanos
+	return seconds, strings.Repeat("0", len(nanos)-9) + nanos
 }
 
 func vDate(v string) string {
-	if (v == "") {return ""}
+	if v == "" {
+		return ""
+	}
 	secStr, nanoStr := versionNumbers(v)
 	seconds, err := strconv.ParseInt(secStr, 10, 64)
-	if (err != nil) {seconds = 0}
+	if err != nil {
+		seconds = 0
+	}
 	nanos, err := strconv.ParseInt(nanoStr, 10, 64)
-	if (err != nil) {nanos = 0}
+	if err != nil {
+		nanos = 0
+	}
 	t := time.Unix(seconds, nanos)
 	return t.Format("2006-01-02T03:04:05PM-07:00")
 }
@@ -735,7 +920,7 @@ func (al *addrList) String() string {
 }
 
 func (al *addrList) Set(value string) error {
-	addr, err := multiaddr.NewMultiaddr(value)
+	addr, err := ma.NewMultiaddr(value)
 	if err != nil {
 		return err
 	}
@@ -743,15 +928,123 @@ func (al *addrList) Set(value string) error {
 	return nil
 }
 
-func StringsToAddrs(addrStrings []string) (maddrs []multiaddr.Multiaddr, err error) {
+func StringsToAddrs(addrStrings []string) (maddrs []ma.Multiaddr, err error) {
 	for _, addrString := range addrStrings {
-		addr, err := multiaddr.NewMultiaddr(addrString)
+		addr, err := ma.NewMultiaddr(addrString)
 		if err != nil {
 			return maddrs, err
 		}
 		maddrs = append(maddrs, addr)
 	}
 	return
+}
+
+type PortMapResult struct {
+	natter nat.NAT
+	addr   net.TCPAddr
+	err    error
+}
+
+func isPrivateIPv4(addr net.IP) bool {
+	a := addr[0]
+	b := addr[1]
+	c := addr[2]
+
+	return a == 10 ||
+		(a == 100 && b >= 64 && b <= 127) ||
+		a == 127 ||
+		(a == 172 && b >= 16 && b <= 31) ||
+		(a == 169 && b == 254) ||
+		(a == 192 && b == 0) ||
+		(a == 192 && b == 2) ||
+		(a == 192 && b == 88 && c == 99) ||
+		(a == 192 && b == 168) ||
+		(a == 198 && b >= 18 && b <= 19) ||
+		(a == 198 && b == 51 && c == 100) ||
+		(a == 203 && b == 0 && c == 113) ||
+		a >= 224
+}
+
+func isPrivateIPv6(addr net.IP) bool {
+	return (addr[15] == 1 && hasValues(addr, 0, 0, 15)) ||
+		addr[0] == 100 ||
+		addr[0] >= 0xFC ||
+		(hasValues(addr, 0, 0, 11) &&
+			hasValues(addr, 255, 11, 13) &&
+			isPrivateIPv4(net.IP{addr[12], addr[13], addr[14], addr[15]}))
+}
+
+func hasValues(addr net.IP, value byte, start int, end int) bool {
+	for i := start; i < end; i++ {
+		if addr[i] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func isPrivate(addr net.IP) bool {
+	if len(addr) == 4 {
+		return isPrivateIPv4(addr)
+	}
+	return isPrivateIPv6(addr)
+}
+
+func mapPort(ctx context.Context, port int) chan PortMapResult {
+	result := make(chan PortMapResult)
+
+	go func() {
+		fmt.Println("DISCOVERING NAT CONTROLLERS...")
+		natChan := nat.DiscoverNATs(context.Background())
+		var natter nat.NAT
+		timer := time.NewTimer(20 * time.Second)
+
+		select {
+		case <-timer.C:
+			timer.Stop()
+			result <- portMapErrString("No NAT found")
+			return
+		case natter = <-natChan:
+			timer.Stop()
+			fmt.Println("Found NAT")
+			ip, err := natter.GetExternalAddress()
+			if err != nil {
+				result <- portMapErr(err)
+				return
+			}
+			fmt.Println("EXTERNAL ADDRESS:", ip)
+			extPort, err := natter.AddPortMapping("tcp", port, "port for textcraft", portMapLeaseTime)
+			if err != nil {
+				result <- portMapErr(err)
+				return
+			}
+			fmt.Println("MAPPED PORT:", extPort)
+			go func() {
+				for {
+					timer.Reset(portMapLeaseTime - 5*time.Second)
+					select {
+					case <-ctx.Done():
+						break
+					case <-timer.C:
+						_, err := natter.AddPortMapping("tcp", port, "port for textcraft", portMapLeaseTime)
+						if err != nil {
+							break
+						}
+					}
+				}
+			}()
+			result <- PortMapResult{natter, net.TCPAddr{ip, extPort, ""}, nil}
+		}
+	}()
+	return result
+}
+
+func portMapErrString(err string) PortMapResult {
+	return PortMapResult{nil, net.TCPAddr{net.IPv4zero, 0, ""}, fmt.Errorf(err)}
+}
+
+func portMapErr(err error) PortMapResult {
+	return PortMapResult{nil, net.TCPAddr{net.IPv4zero, 0, ""}, err}
 }
 
 func main() {
@@ -763,11 +1056,16 @@ func main() {
 	addr := "localhost"
 	port := 8888
 	noBootstrap := false
-	bootstrapArg := addrList([]multiaddr.Multiaddr{})
+	bootstrapArg := addrList([]ma.Multiaddr{})
 	fileList := fileList([]string{})
 	fakeNATPrivate := false
 	fakeNATPublic := false
 	version := false
+	noIPFS := false
+
+	flag.StringVar(&decodeHash, "decode", "", "Test decodinf an IPFS block")
+	flag.BoolVar(&noIPFS, "noipfs", false, "Don't use ipfs")
+	flag.StringVar(&configDir, "config", configDir, "Name of the subdirectory within the ipfs config directory to use for the config")
 	flag.BoolVar(&noBootstrap, "nopeers", false, "Clear the bootstrap peer list")
 	flag.StringVar(&peerKey, "key", "", "Specify peer key")
 	flag.Var(&fileList, "files", "Add the contents of a directory to serve from /")
@@ -780,8 +1078,22 @@ func main() {
 	flag.BoolVar(&fakeNATPrivate, "fakenatprivate", false, "Pretend nat is private")
 	flag.BoolVar(&fakeNATPublic, "fakenatpublic", false, "Pretend nat is publc")
 	flag.BoolVar(&version, "version", false, "Print version number and exit")
+	roy, bill := false, false
+	flag.BoolVar(&roy, "roy", false, "Test as Roy")
+	flag.BoolVar(&bill, "bill", false, "Test as Bill")
+	if roy {
+		test = "roy"
+	} else if bill {
+		test = "bill"
+	}
 	flag.Parse()
-	if (version) {
+	useIPFSLite = !noIPFS
+	if useIPFSLite {
+		fmt.Println("Using IPFS")
+	} else {
+		fmt.Println("Not using IPFS")
+	}
+	if version {
 		fmt.Println("Version ", versionID)
 		os.Exit(0)
 	}
@@ -803,11 +1115,15 @@ func main() {
 		}
 		http.HandleFunc(urlPrefix, func(w http.ResponseWriter, r *http.Request) {
 			for _, dir := range fileList {
-				fmt.Println("SERVING FILE: ", filepath.Join(dir, r.URL.Path[len(urlPrefix) - 1:]))
-				reqFile, err := filepath.Abs(filepath.Join(dir, r.URL.Path[len(urlPrefix) - 1:]))
-				if err != nil {continue}
+				fmt.Println("SERVING FILE: ", filepath.Join(dir, r.URL.Path[len(urlPrefix)-1:]))
+				reqFile, err := filepath.Abs(filepath.Join(dir, r.URL.Path[len(urlPrefix)-1:]))
+				if err != nil {
+					continue
+				}
 				_, err = os.Stat(reqFile)
-				if err != nil {continue}
+				if err != nil {
+					continue
+				}
 				http.ServeFile(w, r, reqFile)
 				return
 			}

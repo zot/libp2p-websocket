@@ -81,14 +81,8 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"reflect"
 	"strconv"
-	"unsafe"
 
-	"github.com/gorilla/websocket"
-	msgpack "github.com/vmihailenco/msgpack/v5"
-
-	//"runtime/debug"
 	"bytes"
 	"errors"
 	"io"
@@ -97,11 +91,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/libp2p/go-libp2p-core/network"
-
-	//msgpack "github.com/vmihailenco/msgpack/v5"
-
-	. "github.com/zot/textcraft-packet"
+	packet "github.com/zot/textcraft-packet"
 )
 
 type messageType byte
@@ -158,6 +150,7 @@ type smsgHelloParams struct {
 }
 type smsgIdentParams struct {
 	publicPeer     bool
+	hasNat         bool
 	peerID         string
 	addresses      []string
 	peerKey        string
@@ -243,97 +236,6 @@ var (
 
 type atomicBoolean int32
 
-func isNum(t reflect.Type) bool {
-	k := t.Kind()
-	return reflect.Int <= k && k <= reflect.Complex128
-}
-
-func marshal(aStruct interface{}) ([]byte, error) {
-	tmpMap, err := structToMap(aStruct)
-	if err != nil {
-		return nil, err
-	}
-	return msgpack.Marshal(tmpMap)
-}
-
-func structToMap(aStruct interface{}) (map[string]interface{}, error) {
-	tmpMap := make(map[string]interface{})
-	val := reflect.ValueOf(aStruct)
-	if reflect.Indirect(val) == val {
-		return nil, fmt.Errorf("attempt to call marshall without a pointer")
-	}
-	for {
-		next := reflect.Indirect(val)
-		if val == next {
-			break
-		}
-		val = next
-	}
-	t := val.Type()
-	for i := 0; i < val.NumField(); i++ {
-		ft := t.Field(i)
-		f := val.Field(i)
-		f, err := privateStructValue(t, ft, f)
-		if err != nil {
-			return nil, err
-		}
-		tmpMap[ft.Name] = f.Interface()
-	}
-	return tmpMap, nil
-}
-
-func unmarshal(bytes []byte, aStruct interface{}) error {
-	var tmpMap map[string]interface{}
-
-	err := msgpack.Unmarshal(bytes, &tmpMap)
-	if err != nil {
-		return err
-	}
-	return mapToStruct(tmpMap, aStruct)
-}
-
-func mapToStruct(aMap map[string]interface{}, aStruct interface{}) error {
-	inputValue := reflect.Indirect(reflect.ValueOf(aStruct))
-	if reflect.Indirect(inputValue) == inputValue {
-		return fmt.Errorf("Attempt to call unmarshall without a pointer")
-	}
-	t := reflect.Indirect(inputValue).Type()
-	fmt.Printf("TYPE: %v\n", t)
-	result := reflect.New(t)
-	newDataValue := reflect.Indirect(result)
-	for k, v := range aMap {
-		if sf, present := t.FieldByName(k); present {
-			f, err := privateStructValue(t, sf, newDataValue.FieldByName(k))
-			if err != nil {
-				return err
-			}
-			vValue := reflect.ValueOf(v)
-			if !vValue.Type().AssignableTo(sf.Type) {
-				if !isNum(sf.Type) || !isNum(vValue.Type()) {
-					return fmt.Errorf("bad value for %s.%s: %v", t.Name(), sf.Name, v)
-				}
-				vValue = vValue.Convert(sf.Type)
-			}
-			f.Set(vValue)
-		} else {
-			fmt.Printf("No field %s.%s\n", t.Name(), k)
-		}
-	}
-	inputValue.Set(result)
-	return nil
-}
-
-// thanks to cpcallen at Stackoverflow: https://stackoverflow.com/a/43918797/1026782
-func privateStructValue(t reflect.Type, sf reflect.StructField, field reflect.Value) (reflect.Value, error) {
-	if field.CanSet() {
-		return field, nil
-	}
-	if sf.PkgPath == "" {
-		return field, fmt.Errorf("cannot set %s.%s", t.Name(), sf.Name)
-	}
-	return reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem(), nil
-}
-
 func (a *atomicBoolean) Get() bool {
 	return atomic.LoadInt32((*int32)(a)) != 0
 }
@@ -398,7 +300,7 @@ type protocolHandler interface {
 	PeerAccess() chan network.Reachability
 	HasConnection(c *client, id uint64) bool
 	CreateClient() *client
-	StartClient(c *client, init func(public bool))
+	StartClient(c *client, init func(public bool, hasNat bool))
 	Listen(c *client, protocol string, frames bool)
 	Stop(c *client, protocol string, retainConnections bool)
 	Close(c *client, conID uint64)
@@ -587,7 +489,6 @@ func (c *client) receiveFrame(con *connection, buf []byte, err error) {
 			fmt.Println("Error reading data from", con, "(", con.id, ")", ": ", err.Error())
 			c.closeStreamWithMessage(con.id, err.Error())
 		} else {
-			//c.writeFullMessage(buf)
 			c.writeMsgpack(&smsgDataParams{strconv.FormatUint(con.id, 10), input})
 		}
 		con.transferChan <- true
@@ -653,7 +554,7 @@ func (c *client) readWebsocket(r *relay) {
 					switch msgType {
 					case cmsgListen, cmsgStop:
 						msg := new(cmsgListenStopParams)
-						err = unmarshal(data[1:], &msg)
+						_, err = packet.Unmarshal(data[1:], &msg)
 						if c.assert(err == nil && len(msg.protocol) > 0, "Bad message format for cmsgListen") {
 							if msgType == cmsgListen {
 								r.Listen(c, msg.protocol, msg.boolParam)
@@ -663,7 +564,7 @@ func (c *client) readWebsocket(r *relay) {
 						}
 					case cmsgClose:
 						msg := new(cmsgCloseParams)
-						err = unmarshal(data[1:], &msg)
+						_, err = packet.Unmarshal(data[1:], &msg)
 						if c.assert(err == nil, "Bad message format for cmsgClose") {
 							id, err := strconv.ParseUint(msg.conID, 10, 64)
 							if err == nil {
@@ -672,7 +573,7 @@ func (c *client) readWebsocket(r *relay) {
 						}
 					case cmsgData:
 						msg := new(cmsgDataParams)
-						err = unmarshal(data[1:], &msg)
+						_, err = packet.Unmarshal(data[1:], &msg)
 						if c.assert(err == nil, "Bad message format for cmsgData") {
 							conID, err := strconv.ParseUint(msg.conID, 10, 64)
 							if err == nil {
@@ -681,7 +582,7 @@ func (c *client) readWebsocket(r *relay) {
 						}
 					case cmsgConnect:
 						msg := new(cmsgConnectParams)
-						err = unmarshal(data[1:], &msg)
+						_, err = packet.Unmarshal(data[1:], &msg)
 						if c.assert(err == nil && len(msg.peerID) > 0, "Bad message format for cmsgConnect") {
 							fmt.Println("Prot:" + msg.prot + ", Peer id: " + msg.peerID + ", Relay: " + boolString(msg.relay))
 							r.Connect(c, msg.prot, msg.peerID, msg.frames, msg.relay)
@@ -707,7 +608,6 @@ func (c *client) putID(conID uint64, offset int) {
 }
 
 func (c *client) closeStreamWithMessage(conID uint64, msg string) {
-	//c.writePackedMessage(smsgConnectionClosed, conID, msg)
 	c.writeMsgpack(&smsgConnectionClosedParams{strconv.FormatUint(conID, 10), msg})
 	c.relay.Close(c, conID)
 }
@@ -832,25 +732,6 @@ func putString(buf []byte, str string) []byte {
 	return buf[2+len(str):]
 }
 
-func (c *client) writeMessage(typ messageType, body []byte) error {
-	return c.writePackedMessage(typ, body)
-}
-
-func (c *client) writePackedMessage(typ messageType, items ...interface{}) error {
-	fmt.Println(append(array("WRITING", typ.serverName(), "MESSAGE"), items...)...)
-	return c.writeFullMessage(Pack1(byte(typ), items...))
-}
-
-func (c *client) writeFullMessage(msg []byte) error {
-	return c.closeOnError(func() error {
-		fmt.Printf("@@@ Writing message type %v\n", messageType(msg[0]).serverName())
-		if c.control == nil {
-			return fmt.Errorf("Connection closed")
-		}
-		return c.control.WriteMessage(websocket.BinaryMessage, msg)
-	})
-}
-
 func (c *client) writeMsgpack(msg messageParams) error {
 	return c.closeOnError(func() error {
 		return writeMsgpack(c.control, msg)
@@ -880,7 +761,7 @@ func (c *client) closeOnError(code func() error) error {
 }
 
 func writeMsgpack(ws *websocket.Conn, msg messageParams) error {
-	data, err := marshal(msg)
+	data, err := packet.Marshal(msg)
 	if err == nil {
 		packet := make([]byte, len(data)+1)
 		packet[0] = byte(msg.msgType())
@@ -891,7 +772,6 @@ func writeMsgpack(ws *websocket.Conn, msg messageParams) error {
 }
 
 func (c *client) connectionRefused(err error, peerid string, protocol string) {
-	//c.writePackedMessage(smsgPeerConnectionRefused, peerid, protocol, err.Error())
 	c.writeMsgpack(&smsgPeerConnectionRefusedParams{peerid, protocol, err.Error()})
 }
 
@@ -899,14 +779,7 @@ func (c *client) newConnection(protocol string, peerid string, create func(conID
 	id := c.newConnectionID()
 	c.read(create(id))
 	c.writeMsgpack(&smsgPeerConnectionParams{strconv.FormatUint(id, 10), peerid, protocol})
-	//c.writePackedMessage(conType, id, peerid, protocol)
 }
-
-//func (c *client) newConnection(conType messageType, protocol string, peerid string, create func(conID uint64) *connection) {
-//	id := c.newConnectionID()
-//	c.read(create(id))
-//	c.writePackedMessage(conType, id, peerid, protocol)
-//}
 
 func (c *client) checkProtocolErr(err error, typ messageType) {
 	if err != nil {
@@ -915,7 +788,7 @@ func (c *client) checkProtocolErr(err error, typ messageType) {
 	}
 }
 
-func (r *relay) StartClient(c *client, init func(public bool)) {
+func (r *relay) StartClient(c *client, init func(public bool, hasNat bool)) {
 	r.handler.StartClient(c, init)
 }
 
@@ -955,7 +828,6 @@ func (r *relay) Start(port uint16, pk string) error {
 						case network.ReachabilityPublic:
 							sending = 2
 						}
-						//c.writePackedMessage(smsgAccessChange, byte(sending))
 						c.writeMsgpack(&smsgAccessChangeParams{sending})
 					}
 				})
@@ -1032,7 +904,6 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 					return nil
 				})
 				if alreadyConnected != nil {
-					//con.WriteMessage(websocket.BinaryMessage, Pack(byte(smsgError), "There is already a connection"))
 					writeMsgpack(con, &smsgErrorParams{"There is already a connection"})
 					con.Close()
 					return
@@ -1068,7 +939,7 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 					}
 					if messageType(data[0]) == cmsgStart {
 						msg := new(cmsgStartParams)
-						err := unmarshal(data[1:], &msg)
+						_, err = packet.Unmarshal(data[1:], msg)
 						if err != nil {
 							fmt.Println("BAD START MESSAGE")
 							con.Close()
@@ -1125,10 +996,9 @@ func (r *relay) runProtocol(con *websocket.Conn) {
 			}
 		}()
 		// start the client, send ident message when ready
-		r.StartClient(client, func(public bool) {
+		r.StartClient(client, func(public bool, hasNat bool) {
 			_, v2 := r.Versions()
-			//client.writePackedMessage(smsgIdent, public, r.peerID, r.handler.AddressesJson(), r.handler.PeerKey(), v2)
-			client.writeMsgpack(&smsgIdentParams{public, r.peerID, r.handler.AddressArray(), r.handler.PeerKey(), v2})
+			client.writeMsgpack(&smsgIdentParams{public, hasNat, r.peerID, r.handler.AddressArray(), r.handler.PeerKey(), v2})
 			runSvc(client)
 			client.readWebsocket(r)
 		})

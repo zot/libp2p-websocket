@@ -743,10 +743,6 @@ func initp2p() {
 							return addrs
 						}
 					}
-					_, err = addr.ValueForProtocol(proto)
-					if err != nil {
-						//addr
-					}
 					return append(addrs, addr)
 				}))
 			}

@@ -2,6 +2,10 @@ module github.com/zot/ipfs-p2p-websocket
 
 go 1.14
 
+replace github.com/zot/textcraft-packet => /home/bill/work/p2pmud2-projects/textcraft-packet
+
+replace github.com/zot/textcraft-treerequest => /home/bill/work/p2pmud2-projects/textcraft-treerequest
+
 require (
 	github.com/AndreasBriese/bbloom v0.0.0-20190825152654-46b345b51c96 // indirect
 	github.com/go-errors/errors v1.0.1
@@ -24,6 +28,7 @@ require (
 	github.com/libp2p/go-libp2p-core v0.5.7
 	github.com/libp2p/go-libp2p-discovery v0.4.0
 	github.com/libp2p/go-libp2p-kad-dht v0.8.2
+	github.com/libp2p/go-libp2p-quic-transport v0.6.0
 	github.com/libp2p/go-libp2p-secio v0.2.2
 	github.com/libp2p/go-libp2p-tls v0.1.3
 	github.com/libp2p/go-nat v0.0.5

@@ -2,9 +2,9 @@ module github.com/zot/ipfs-p2p-websocket
 
 go 1.14
 
-replace github.com/zot/textcraft-packet => /home/bill/work/p2pmud2-projects/textcraft-packet
+//replace github.com/zot/textcraft-packet => /home/bill/work/p2pmud2-projects/textcraft-packet
 
-replace github.com/zot/textcraft-treerequest => /home/bill/work/p2pmud2-projects/textcraft-treerequest
+//replace github.com/zot/textcraft-treerequest => /home/bill/work/p2pmud2-projects/textcraft-treerequest
 
 require (
 	github.com/AndreasBriese/bbloom v0.0.0-20190825152654-46b345b51c96 // indirect

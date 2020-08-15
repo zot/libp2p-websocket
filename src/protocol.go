@@ -40,7 +40,7 @@ messages, with the first byte of each message identifying the command.
 # CLIENT-TO-SERVER MESSAGES
 
 ```
-  Start:       [0][KEY: str] -- start peer with optional peer key
+  Start:       [0][TREEPROTOCOL: str][TREENAME: str][KEY: str] -- start peer with optional peer key
   Listen:      [1][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
   Stop:        [2][PROTOCOL: rest] -- stop listening to PROTOCOL
   Close:       [3][ID: 8]                     -- close a stream
@@ -108,8 +108,10 @@ const (
 )
 
 type cmsgStartParams struct {
-	port    int
-	peerKey string
+	treeProtocol string
+	treeName     string
+	port         int
+	peerKey      string
 }
 type cmsgListenStopParams struct {
 	boolParam bool
@@ -296,7 +298,7 @@ type relay struct {
 type protocolHandler interface {
 	Versions() (string, string)
 	Started() bool
-	Start(port uint16, peerKey string) error
+	Start(treeProtocol string, treeName string, port uint16, peerKey string) error
 	PeerAccess() chan network.Reachability
 	HasConnection(c *client, id uint64) bool
 	CreateClient() *client
@@ -318,16 +320,12 @@ type chanSvc interface {
 }
 
 func (t messageType) clientName() string {
-	if int(t) < len(cmsgNames) {
-		return cmsgNames[t]
-	}
+	if int(t) < len(cmsgNames) {return cmsgNames[t]}
 	return fmt.Sprint("UNKNOWN SERVER MESSAGE: %d", byte(t))
 }
 
 func (t messageType) serverName() string {
-	if int(t) < len(smsgNames) {
-		return smsgNames[t]
-	}
+	if int(t) < len(smsgNames) {return smsgNames[t]}
 	return fmt.Sprint("UNKNOWN SERVER MESSAGE: %d", byte(t))
 }
 
@@ -358,10 +356,9 @@ func svc(s chanSvc, code func()) {
 func runSvc(s chanSvc) {
 	go func() {
 		for {
+
 			cmd, ok := <-s.getSvcChannel()
-			if !ok {
-				break
-			}
+			if !ok {break}
 			cmd()
 		}
 	}()
@@ -800,10 +797,8 @@ func (r *relay) Started() bool {
 	return r.handler.Started()
 }
 
-func (r *relay) Start(port uint16, pk string) error {
-	if err := r.handler.Start(port, pk); err != nil {
-		return err
-	}
+func (r *relay) Start(treeProtocol string, treeName string, port uint16, pk string) error {
+	if err := r.handler.Start(treeProtocol, treeName, port, pk); err != nil {return err}
 	go func() {
 		for {
 			status := <-r.handler.PeerAccess()
@@ -945,7 +940,7 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 							con.Close()
 							return
 						}
-						err = r.Start(uint16(msg.port), msg.peerKey)
+						err = r.Start(msg.treeProtocol, msg.treeName, uint16(msg.port), msg.peerKey)
 						if err != nil {
 							fmt.Println("ERROR, BAD PORT:", msg.port)
 							con.Close()
@@ -1014,8 +1009,6 @@ func array(item ...interface{}) []interface{} {
 }
 
 func boolString(b bool) string {
-	if b {
-		return "true"
-	}
+	if b {return "true"}
 	return "false"
 }

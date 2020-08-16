@@ -321,12 +321,12 @@ type chanSvc interface {
 
 func (t messageType) clientName() string {
 	if int(t) < len(cmsgNames) {return cmsgNames[t]}
-	return fmt.Sprint("UNKNOWN SERVER MESSAGE: %d", byte(t))
+	return fmt.Sprintf("UNKNOWN SERVER MESSAGE: %d", byte(t))
 }
 
 func (t messageType) serverName() string {
 	if int(t) < len(smsgNames) {return smsgNames[t]}
-	return fmt.Sprint("UNKNOWN SERVER MESSAGE: %d", byte(t))
+	return fmt.Sprintf("UNKNOWN SERVER MESSAGE: %d", byte(t))
 }
 
 func svcSync(s chanSvc, code func() interface{}) interface{} {
@@ -715,7 +715,6 @@ func choosePort() int {
 			log.Fatal("No available ports!")
 		}
 	}
-	return -1
 }
 
 func getString(data []byte) (string, []byte) {
@@ -948,7 +947,7 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 							r.runProtocol(con)
 						}
 					} else {
-						fmt.Println("ERROR, EXPECTED START MESSAGE BUT GOT", messageType(data[0]).clientName)
+						fmt.Println("ERROR, EXPECTED START MESSAGE BUT GOT", messageType(data[0]).clientName())
 						con.Close()
 					}
 					// only continue loop with continue statement
@@ -975,18 +974,16 @@ func (r *relay) runProtocol(con *websocket.Conn) {
 			client.ticker = time.NewTicker(pingPeriod)
 			defer client.ticker.Stop()
 			for !done.Get() {
-				select {
-				case _, ok := <-client.ticker.C:
-					if ok {
-						svc(client, func() {
-							if err := con.WriteMessage(websocket.PingMessage, nil); err != nil {
-								done.Set(true)
-								client.close()
-							}
-						})
-					} else {
-						break
-					}
+				_, ok := <-client.ticker.C
+				if ok {
+					svc(client, func() {
+						if err := con.WriteMessage(websocket.PingMessage, nil); err != nil {
+							done.Set(true)
+							client.close()
+						}
+					})
+				} else {
+					break
 				}
 			}
 		}()

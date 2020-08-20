@@ -30,12 +30,13 @@
 # CLIENT-TO-SERVER MESSAGES
  
 ```
-  Start:       [0][TREEPROTOCOL: str][TREENAME: str][KEY: str] -- start peer with optional peer key
+  Start:       [0][TREEPROTOCOL: str][TREENAME: str][KEY: str][FRIENDS: array of str] -- start peer with optional peer key
   Listen:      [1][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
   Stop:        [2][PROTOCOL: rest] -- stop listening to PROTOCOL
   Close:       [3][ID: 8]                     -- close a stream
   Data:        [4][ID: 8][data: rest]         -- write data to stream
   Connect:     [5][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
+  Friends:     [6][ADD: []str][REMOVE: []str] -- alter friend list
 ```
 
 # SERVER-TO-CLIENT MESSAGES
@@ -53,6 +54,7 @@
   Protocol Error:          [9][MSG: rest]                      -- error in the protocol
   Listening:               [10][PROTOCOL: rest]                -- confirmation that listening has started
   Access Change:           [11][PUBLIC: 1]                     -- peer access has changed
+  Presence Change:         [12][ONLINE: []str][OFFLINE: []str] -- peer access has changed
 ```
 */
 "use strict"
@@ -75,6 +77,7 @@ const cmsg = Object.freeze({
     close: 3,
     data: 4,
     connect: 5,
+    friends: 6,
 });
 
 const smsg = Object.freeze({
@@ -90,6 +93,7 @@ const smsg = Object.freeze({
     error: 9,
     listening: 10,
     accessChange: 11,
+    presenceChange: 12,
 });
 
 const errors = Object.freeze({
@@ -140,8 +144,8 @@ function close(conID) {
     sendMsg(cmsg.close, { conID: String(conID) });
 }
 
-function start(treeProtocol, treeName, port, peerKey = '') {
-    sendMsg(cmsg.start, { treeProtocol, treeName, port, peerKey });
+function start(treeProtocol, treeName, port, peerKey = '', friends = []) {
+    sendMsg(cmsg.start, { treeProtocol, treeName, port, peerKey, friends });
 }
 
 function sendMsg(msgType, msg) {
@@ -166,6 +170,13 @@ function connect(peerID, prot, frames, relay = false) {
     });
 }
 
+function friends(add, remove) {
+    sendMsg(cmsg.friends, {
+        add,
+        remove,
+    });
+}
+
 // methods mimic the parameter order of the protocol
 class BlankHandler {
     hello(running, thisVersion) { }
@@ -180,6 +191,7 @@ class BlankHandler {
     error(msg) { }
     listening(protocol) { }
     accessChange(access) { }
+    presenceChange(online, offset) { }
 }
 
 class DelegatingHandler {
@@ -224,6 +236,9 @@ class DelegatingHandler {
     }
     accessChange(status) {
         this.tryDelegate('accessChange', arguments);
+    }
+    presenceChange(online, offline) {
+        this.tryDelegate('presenceChange', arguments);
     }
     insertDelegatingHandler(hand) {
         hand.delegate = this.delegate;
@@ -363,6 +378,10 @@ class LoggingHandler extends DelegatingHandler {
     }
     accessChange(status) {
         receivedMessageArgs('accessChange', arguments);
+        super.accessChange(status)
+    }
+    presenceChange(status) {
+        receivedMessageArgs('presenceChange', arguments);
         super.accessChange(status)
     }
 }
@@ -858,7 +877,7 @@ function startProtocol(urlStr, handler) {
         msg.data.arrayBuffer().then(buf => {
             var msg;
             var data = new Uint8Array(buf);
-
+            
             try {
                 msg = MessagePack.decode(data.slice(1))
             } catch (err) {
@@ -869,51 +888,53 @@ function startProtocol(urlStr, handler) {
             console.log("MESSAGE: [", data.join(", "), "]");
             console.log("TYPE: ", enumFor(smsg, data[0]));
             switch (data[0]) {
-                case smsg.hello:
-                    handler.hello(msg.started, msg.version);
-                    break;
-                case smsg.ident:
-                    handler.ident(msg.publicPeer ? natStatus.public : natStatus.private, msg.peerID, msg.addresses, msg.peerKey, msg.currentVersion, msg.hasNat);
-                    break;
-                case smsg.listenerConnection:
-                    handler.listenerConnection(BigInt(msg.conID), msg.peerID, msg.protocol);
-                    break;
-                case smsg.connectionClosed:
-                    handler.connectionClosed(BigInt(msg.conID), msg.reason);
-                    break;
-                case smsg.data:
-                    handler.data(BigInt(msg.conID), msg.data);
-                    break;
-                case smsg.listenRefused:
-                    handler.listenRefused(msg.prot);
-                    break;
-                case smsg.listenerClosed:
-                    handler.listenerClosed(msg.prot);
-                    break;
-                case smsg.peerConnection:
-                    handler.peerConnection(BigInt(msg.conID), msg.peerID, msg.protocol)
-                    break;
-                case smsg.peerConnectionRefused: {
-                    handler.peerConnectionRefused(msg.peerID, msg.protocol, msg.reason);
-                    break;
-                }
-                case smsg.error:
-                    handler.error(msg.message);
-                    break;
-                case smsg.listening:
-                    handler.listening(msg.protocol);
-                    break;
-                case smsg.accessChange:
-                    handler.accessChange(
-                        msg.access === 0 ? natStatus.unknown
-                            : msg.access === 1 ? natStatus.private
-                                : msg.access === 2 ? natStatus.public
-                                    : natStatus.maybePublic
-                    );
-                    break;
-                default:
-                    alert(`Unknown message type ${data[0]}`)
-                    break;
+            case smsg.hello:
+                handler.hello(msg.started, msg.version);
+                break;
+            case smsg.ident:
+                handler.ident(msg.publicPeer ? natStatus.public : natStatus.private, msg.peerID, msg.addresses, msg.peerKey, msg.currentVersion, msg.hasNat);
+                break;
+            case smsg.listenerConnection:
+                handler.listenerConnection(BigInt(msg.conID), msg.peerID, msg.protocol);
+                break;
+            case smsg.connectionClosed:
+                handler.connectionClosed(BigInt(msg.conID), msg.reason);
+                break;
+            case smsg.data:
+                handler.data(BigInt(msg.conID), msg.data);
+                break;
+            case smsg.listenRefused:
+                handler.listenRefused(msg.prot);
+                break;
+            case smsg.listenerClosed:
+                handler.listenerClosed(msg.prot);
+                break;
+            case smsg.peerConnection:
+                handler.peerConnection(BigInt(msg.conID), msg.peerID, msg.protocol)
+                break;
+            case smsg.peerConnectionRefused: {
+                handler.peerConnectionRefused(msg.peerID, msg.protocol, msg.reason);
+                break;
+            }
+            case smsg.error:
+                handler.error(msg.message);
+                break;
+            case smsg.listening:
+                handler.listening(msg.protocol);
+                break;
+            case smsg.accessChange:
+                handler.accessChange(
+                    msg.access === 0 ? natStatus.unknown
+                        : msg.access === 1 ? natStatus.private
+                        : msg.access === 2 ? natStatus.public
+                        : natStatus.maybePublic
+                );
+                break;
+            case smsg.presenceChange:
+                handler.presenceChange(msg.online, msg.offline);
+            default:
+                alert(`Unknown message type ${data[0]}`)
+                break;
             }
         });
     }

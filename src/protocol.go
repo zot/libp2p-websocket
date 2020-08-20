@@ -40,12 +40,13 @@ messages, with the first byte of each message identifying the command.
 # CLIENT-TO-SERVER MESSAGES
 
 ```
-  Start:       [0][TREEPROTOCOL: str][TREENAME: str][KEY: str] -- start peer with optional peer key
+  Start:       [0][TREEPROTOCOL: str][TREENAME: str][KEY: str][FRIENDS: array of str] -- start peer with optional peer key
   Listen:      [1][FRAMES: 1][PROTOCOL: rest] -- request a listener for a protocol (frames optional)
   Stop:        [2][PROTOCOL: rest] -- stop listening to PROTOCOL
   Close:       [3][ID: 8]                     -- close a stream
   Data:        [4][ID: 8][data: rest]         -- write data to stream
   Connect:     [5][FRAMES: 1][PROTOCOL: STR][RELAY: STR][PEERID: rest] -- connect to another peer (frames optional)
+  Friends:     [6][ADD: []str][REMOVE: []str] -- alter friend list
 ```
 
 # SERVER-TO-CLIENT MESSAGES
@@ -63,6 +64,7 @@ messages, with the first byte of each message identifying the command.
   Protocol Error:          [9][MSG: rest]                      -- error in the protocol
   Listening:               [10][PROTOCOL: rest]                -- confirmation that listening has started
   Access Change:           [11][PUBLIC: 1]                     -- peer access has changed
+  Presence Change:         [12][ONLINE: []str][OFFLINE: []str] -- peer access has changed
 ```
 
 This code uses quite a few goroutines and channels. Here is the pattern:
@@ -105,6 +107,7 @@ const (
 	cmsgClose
 	cmsgData
 	cmsgConnect
+	cmsgFriends
 )
 
 type cmsgStartParams struct {
@@ -112,6 +115,7 @@ type cmsgStartParams struct {
 	treeName     string
 	port         int
 	peerKey      string
+	friends      []string
 }
 type cmsgListenStopParams struct {
 	boolParam bool
@@ -131,6 +135,11 @@ type cmsgConnectParams struct {
 	peerID string
 }
 
+type cmsgFriendsParams struct {
+	add    []string
+	remove []string
+}
+
 const (
 	smsgHello messageType = iota
 	smsgIdent
@@ -144,6 +153,7 @@ const (
 	smsgError
 	smsgListening
 	smsgAccessChange
+	smsgPresenceChange
 )
 
 type smsgHelloParams struct {
@@ -197,6 +207,10 @@ type smsgListeningParams struct {
 type smsgAccessChangeParams struct {
 	access int
 }
+type smsgPresenceChangeParams struct {
+	online  []string
+	offline []string
+}
 
 type messageParams interface{ msgType() messageType }
 
@@ -212,9 +226,10 @@ func (smsg smsgPeerConnectionRefusedParams) msgType() messageType { return smsgP
 func (smsg smsgErrorParams) msgType() messageType                 { return smsgError }
 func (smsg smsgListeningParams) msgType() messageType             { return smsgListening }
 func (smsg smsgAccessChangeParams) msgType() messageType          { return smsgAccessChange }
+func (smsg smsgPresenceChangeParams) msgType() messageType        { return smsgPresenceChange }
 
-var cmsgNames = [...]string{"cmsgStart", "cmsgListen", "cmsgStop", "cmsgClose", "cmsgData", "cmsgConnect"}
-var smsgNames = [...]string{"smsgHello", "smsgIdent", "smsgNewConnection", "smsgConnectionClosed", "smsgData", "smsgListenRefused", "smsgListenerClosed", "smsgPeerConnection", "smsgPeerConnectionRefused", "smsgError", "smsgListening", "smsgAccessChange"}
+var cmsgNames = [...]string{"cmsgStart", "cmsgListen", "cmsgStop", "cmsgClose", "cmsgData", "cmsgConnect", "cmsgFriends"}
+var smsgNames = [...]string{"smsgHello", "smsgIdent", "smsgNewConnection", "smsgConnectionClosed", "smsgData", "smsgListenRefused", "smsgListenerClosed", "smsgPeerConnection", "smsgPeerConnectionRefused", "smsgError", "smsgListening", "smsgAccessChange", "smsgPresenceChange"}
 
 const (
 	maxMessageSize = 65536 // Maximum websocket message size
@@ -298,7 +313,7 @@ type relay struct {
 type protocolHandler interface {
 	Versions() (string, string)
 	Started() bool
-	Start(treeProtocol string, treeName string, port uint16, peerKey string) error
+	Start(treeProtocol string, treeName string, port uint16, peerKey string, friends []string) error
 	PeerAccess() chan network.Reachability
 	HasConnection(c *client, id uint64) bool
 	CreateClient() *client
@@ -308,6 +323,7 @@ type protocolHandler interface {
 	Close(c *client, conID uint64)
 	Data(c *client, conID uint64, data []byte)
 	Connect(c *client, protocol string, peerID string, frames bool, relay bool)
+	Friends(add []string, remove []string) error
 	CleanupClosed(c *connection)
 	AddressesJson() string
 	AddressArray() []string
@@ -584,6 +600,12 @@ func (c *client) readWebsocket(r *relay) {
 							fmt.Println("Prot:" + msg.prot + ", Peer id: " + msg.peerID + ", Relay: " + boolString(msg.relay))
 							r.Connect(c, msg.prot, msg.peerID, msg.frames, msg.relay)
 						}
+					case cmsgFriends:
+						msg := new(cmsgFriendsParams)
+						_, err = packet.Unmarshal(data[1:], &msg)
+						if err == nil {
+							err = r.Friends(msg.add, msg.remove)
+						}
 					}
 				}
 				if err != nil {
@@ -796,8 +818,8 @@ func (r *relay) Started() bool {
 	return r.handler.Started()
 }
 
-func (r *relay) Start(treeProtocol string, treeName string, port uint16, pk string) error {
-	if err := r.handler.Start(treeProtocol, treeName, port, pk); err != nil {return err}
+func (r *relay) Start(treeProtocol string, treeName string, port uint16, pk string, friends []string) error {
+	if err := r.handler.Start(treeProtocol, treeName, port, pk, friends); err != nil {return err}
 	go func() {
 		for {
 			status := <-r.handler.PeerAccess()
@@ -861,6 +883,10 @@ func (r *relay) Data(c *client, conID uint64, data []byte) {
 
 func (r *relay) Connect(c *client, protocol string, peerID string, frames bool, relay bool) {
 	r.handler.Connect(c, protocol, peerID, frames, relay)
+}
+
+func (r *relay) Friends(add []string, remove []string) error {
+	return r.handler.Friends(add, remove)
 }
 
 func (r *relay) CloseClient(c *client) {
@@ -939,7 +965,7 @@ func (r *relay) handleConnection() func(http.ResponseWriter, *http.Request) {
 							con.Close()
 							return
 						}
-						err = r.Start(msg.treeProtocol, msg.treeName, uint16(msg.port), msg.peerKey)
+						err = r.Start(msg.treeProtocol, msg.treeName, uint16(msg.port), msg.peerKey, msg.friends)
 						if err != nil {
 							fmt.Println("ERROR, BAD PORT:", msg.port)
 							con.Close()

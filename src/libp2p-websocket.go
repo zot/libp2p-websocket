@@ -26,14 +26,10 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
 	"encoding/ascii85"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -56,16 +52,14 @@ import (
 
 	"github.com/go-errors/errors"
 	ipfslite "github.com/hsanjuan/ipfs-lite"
-	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
 	ipfsconfig "github.com/ipfs/go-ipfs-config"
-	files "github.com/ipfs/go-ipfs-files"
-	ipld "github.com/ipfs/go-ipld-format"
-	"github.com/ipfs/go-merkledag"
-	unixfs "github.com/ipfs/go-unixfs"
-	ufile "github.com/ipfs/go-unixfs/file"
+	pinner "github.com/ipfs/go-ipfs-pinner"
+	"github.com/ipfs/go-ipfs/namesys"
+	ipfspath "github.com/ipfs/go-path"
 	"github.com/libp2p/go-libp2p"
+	autonat "github.com/libp2p/go-libp2p-autonat"
 	connmgr "github.com/libp2p/go-libp2p-connmgr"
 	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/libp2p/go-libp2p-core/host"
@@ -79,15 +73,9 @@ import (
 	libp2ptls "github.com/libp2p/go-libp2p-tls"
 	nat "github.com/libp2p/go-nat"
 
-	//basicHost "github.com/libp2p/go-libp2p/p2p/host/basic"
-	//circuit "github.com/libp2p/go-libp2p-circuit"
-	//rly "github.com/libp2p/go-libp2p/p2p/host/relay"
-	//routing "github.com/libp2p/go-libp2p-routing"
-	autonat "github.com/libp2p/go-libp2p-autonat"
 	//pubsub "github.com/libp2p/go-libp2p-pubsub"
 	//pb "github.com/libp2p/go-libp2p-pubsub/pb"
 
-	//dht "github.com/libp2p/go-libp2p-kad-dht"
 	ma "github.com/multiformats/go-multiaddr"
 	//logging "github.com/whyrusleeping/go-logging"
 
@@ -150,7 +138,7 @@ const (
 	portMapLeaseTime = 10 * time.Second // must be larger than 5 seconds
 )
 
-var clearTree bool = false
+var clearTree = false
 var publishTree cid.Cid
 var hasNat = true
 var customNatTraversal = true
@@ -171,7 +159,6 @@ var centralRelay *libp2pRelay
 var started bool
 var logger = goLog.Logger("p2pmud")
 var peerKeyString string
-var peerKey crypto.PrivKey
 var listenAddresses addrList
 var fakeNatStatus string
 var bootstrapPeers addrList
@@ -192,10 +179,15 @@ var bootstrapPeerStrings = []string{
 	"/ip4/104.131.131.82/udp/4001/quic/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
 }
 var conf struct {
-	lite   *ipfslite.Peer
-	myHost host.Host
-	dstor  datastore.Batching
-	dht    *dualdht.DHT
+	lite      *ipfslite.Peer
+	myHost    host.Host
+	dstor     datastore.Batching
+	dht       *dualdht.DHT
+	publisher *namesys.IpnsPublisher
+	peerKey   crypto.PrivKey
+	friends   map[peer.ID]bool
+	treeName  string
+	pin       pinner.Pinner
 }
 var peerFinder interface {
 	FindPeer(context.Context, peer.ID) (peer.AddrInfo, error)
@@ -300,22 +292,29 @@ func (r *libp2pRelay) Started() bool {
 	return started
 }
 
-func (r *libp2pRelay) Start(treeProtocol string, treeName string, port uint16, pk string) error {
+func (r *libp2pRelay) Start(treeProtocol string, treeName string, port uint16, pk string, friends []string) error {
+	var err error
 	peerKeyString = pk
+	conf.friends = make(map[peer.ID]bool)
+	conf.treeName = treeName
+	for _, friend := range friends {
+		friendPeer, err := peer.Decode(friend)
+		if err != nil {return fmt.Errorf("error decoding peerID %s: %w", friend, err)}
+		conf.friends[friendPeer] = true
+	}
 	fmt.Println("STARTING RELAY...")
 	if port != 0 {
 		p2pPort = int(port)
 	} else {
 		p2pPort = 4005
 	}
-
 	addrs, err := stringsToAddrs([]string{
 		fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic", p2pPort),
 		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", p2pPort),
 	})
 	if err != nil {return err}
 	listenAddresses = addrs
-	initp2p(treeProtocol, treeName)
+	initp2p(treeProtocol)
 	fmt.Println("STARTED")
 	return nil
 }
@@ -466,6 +465,23 @@ func (r *libp2pRelay) Connect(c *client, prot string, peerid string, frames bool
 			return &con.connection
 		})
 	}
+}
+
+// FRIENDS API METHOD
+func (r *libp2pRelay) Friends(add []string, remove []string) error {
+	var err error
+	addPeerIDs := make([]peer.ID, len(add))
+	removePeerIDs := make([]peer.ID, len(remove))
+	for i, friend := range add {
+		addPeerIDs[i], err = peer.Decode(friend)
+		if err != nil {return err}
+	}
+	for i, friend := range remove {
+		removePeerIDs[i], err = peer.Decode(friend)
+		if err != nil {return err}
+	}
+	treerequest.ChangePeers(conf.treeName, addPeerIDs, removePeerIDs)
+	return nil
 }
 
 func logLine(str string, items ...interface{}) {
@@ -658,7 +674,7 @@ func checkVersion() {
 	}
 }
 
-func initp2p(treeProtocol string, treeName string) {
+func initp2p(treeProtocol string) {
 	var keyBytes []byte
 	var err error
 	var opts []libp2p.Option
@@ -682,7 +698,7 @@ func initp2p(treeProtocol string, treeName string) {
 			opts = ipfslite.Libp2pOptionsExtra
 		}
 		if peerKeyString == "" {
-			peerKey, _, err = crypto.GenerateKeyPair(crypto.RSA, 2048)
+			conf.peerKey, _, err = crypto.GenerateKeyPair(crypto.RSA, 2048)
 			fmt.Println("   ###   ADDING PEER KEY")
 		}
 	} else {
@@ -704,11 +720,11 @@ func initp2p(treeProtocol string, treeName string) {
 		keyBytes, err = crypto.ConfigDecodeKey(peerKeyString)
 		checkErr(err)
 		fmt.Printf("###\n### KEY BYTES: %d\n", len(keyBytes))
-		peerKey, err = crypto.UnmarshalPrivateKey(keyBytes)
+		conf.peerKey, err = crypto.UnmarshalPrivateKey(keyBytes)
 		checkErr(err)
 		fmt.Println("   ###   ADDING PEER KEY")
 		if !useIPFSLite {
-			opts = append(opts, libp2p.Identity(peerKey))
+			opts = append(opts, libp2p.Identity(conf.peerKey))
 		}
 	}
 	if fakeNatStatus == "public" {
@@ -782,14 +798,14 @@ func initp2p(treeProtocol string, treeName string) {
 			err = os.Mkdir(path, 0700)
 			checkErr(err)
 		}
-		fmt.Println("Datastore:", string(path))
+		fmt.Println("Datastore:", path)
 		conf.dstor, err = ipfslite.BadgerDatastore(path)
 		checkErr(err)
 		fmt.Println("Listen addresses:")
 		printMaddrs(listenAddresses, "")
 		conf.myHost, conf.dht, err = ipfslite.SetupLibp2p(
 			ctx,
-			peerKey,
+			conf.peerKey,
 			nil,
 			listenAddresses,
 			conf.dstor,
@@ -798,6 +814,11 @@ func initp2p(treeProtocol string, treeName string) {
 		checkErr(err)
 		conf.lite, err = ipfslite.New(ctx, conf.dstor, conf.myHost, conf.dht, nil)
 		checkErr(err)
+		conf.publisher = namesys.NewIpnsPublisher(conf.dht, conf.dstor)
+		conf.pin, err = pinner.LoadPinner(conf.dstor, conf.lite, conf.lite)
+		if err != nil {
+			conf.pin = pinner.NewPinner(conf.dstor, conf.lite, conf.lite)
+		}
 	} else {
 		conf.myHost, err = libp2p.New(ctx, opts...)
 	}
@@ -808,10 +829,12 @@ func initp2p(treeProtocol string, treeName string) {
 	checkVersion()
 	if fakeNatStatus == "public" {
 		centralRelay.setNATStatus(network.ReachabilityPublic)
-		initTree(ctx, treeProtocol, treeName)
+		err := initTree(ctx, treeProtocol)
+		checkErr(err)
 	} else if fakeNatStatus == "private" {
 		centralRelay.setNATStatus(network.ReachabilityPrivate)
-		initTree(ctx, treeProtocol, treeName)
+		err := initTree(ctx, treeProtocol)
+		checkErr(err)
 	} else {
 		/// MONITOR NAT STATUS
 		fmt.Println("Creating autonat")
@@ -849,7 +872,8 @@ func initp2p(treeProtocol string, treeName string) {
 						accessChan <- status
 						if init {
 							init = false
-							initTree(ctx, treeProtocol, treeName)
+							err := initTree(ctx, treeProtocol)
+							checkErr(err)
 						}
 					}
 					return nil
@@ -858,11 +882,11 @@ func initp2p(treeProtocol string, treeName string) {
 			}
 		}()
 	}
-	peerKey = conf.myHost.Peerstore().PrivKey(conf.myHost.ID())
-	keyBytes, err = crypto.MarshalPrivateKey(peerKey)
+	conf.peerKey = conf.myHost.Peerstore().PrivKey(conf.myHost.ID())
+	keyBytes, err = crypto.MarshalPrivateKey(conf.peerKey)
 	checkErr(err)
 	peerKeyString = crypto.ConfigEncodeKey(keyBytes)
-	fmt.Printf("host private %s key: %s\n", reflect.TypeOf(peerKey), peerKeyString)
+	fmt.Printf("host private %s key: %s\n", reflect.TypeOf(conf.peerKey), peerKeyString)
 
 	if useIPFSLite {
 		conf.lite.Bootstrap(ipfslite.DefaultBootstrapPeers())
@@ -913,19 +937,51 @@ func initp2p(treeProtocol string, treeName string) {
 
 }
 
-func initTree(ctx context.Context, treeProtocol string, treeName string) {
-	if conf.lite == nil {return}
+func initTree(ctx context.Context, treeProtocol string) error {
+	if conf.lite == nil {return nil}
 	publish := make(map[string]cid.Cid)
 	if clearTree {
 		publish = nil
 		fmt.Println("###\n### REQUESTING TREE CLEAR\n###")
 	} else if publishTree != cid.Undef {
-		fmt.Println("###\n### SENDING TREE", publishTree, "TO PUBLISH AS", treeName, "\n###")
-		publish[treeName] = publishTree
+		fmt.Println("###\n### SENDING TREE", publishTree, "TO PUBLISH AS", conf.treeName, "\n###")
+		publish[conf.treeName] = publishTree
 	} else {
 		fmt.Println("###\n### NOT SENDING ANY TREE TO PUBLISH\n###")
 	}
-	checkErr(treerequest.InitTreeRequest(treeProtocol, conf.dstor, conf.myHost, conf.lite.BlockStore(), conf.lite.Session(ctx), conf.lite, 10000, publish))
+	checkErr(treerequest.InitTreeRequest(treeProtocol, conf.dstor, conf.myHost, conf.peerKey, conf.lite.BlockStore(), conf.lite.Session(ctx), conf.lite, conf.pin, 10000, publish, treerequestConnection))
+	treerequest.ChangePeers(conf.treeName, friends(), nil)
+	treerequest.HandlePeerFileRequests("/peerEncrypted/", true, publishFile)
+	treerequest.HandlePeerFileRequests("/peer/", false, publishFile)
+	tree, err := treerequest.GetTree(conf.treeName, conf.myHost.ID())
+	if err != nil && err != datastore.ErrNotFound {return err}
+	if err == nil { // publish to IPNS on startup
+		publishFile("/", tree.Root())
+	}
+	return nil
+}
+
+func friends() []peer.ID {
+	friends := make([]peer.ID, len(conf.friends))
+	i := 0
+	for friend := range conf.friends {
+		friends[i] = friend
+		i++
+	}
+	return friends
+}
+
+func treerequestConnection(peerID peer.ID) {
+	fmt.Println("###\n### NEW CONNECTION:", peerID, "\n###")
+}
+
+func publishFile(filename string, newRoot cid.Cid) {
+	go func() {
+		err := conf.publisher.Publish(context.Background(), conf.peerKey, ipfspath.FromCid(newRoot))
+		if err != nil {
+			fmt.Printf("Error: %s\n", err)
+		}
+	}()
 }
 
 func natStatus(status network.Reachability) string {
@@ -967,7 +1023,7 @@ func vDate(v string) string {
 func (fl *fileList) String() string {
 	strs := make([]string, len(*fl))
 	for i, file := range *fl {
-		strs[i] = string(file)
+		strs[i] = file
 	}
 	return strings.Join(strs, ",")
 }
@@ -977,7 +1033,6 @@ func (fl *fileList) Set(value string) error {
 	if err != nil {return err}
 	*fl = append(*fl, value)
 	return nil
-
 }
 
 func (al *addrList) String() string {
@@ -1116,151 +1171,12 @@ func errstrw(format string, args ...interface{}) string {
 }
 
 func errstr(format string, args ...interface{}) string {
-	return fmt.Sprintf(format, args...) + "\n" + string(debug.Stack())
-}
-
-func getFileForBlock(urlPath string, block blocks.Block) (io.ReadSeeker, error) {
-	node, err := ipld.Decode(block)
-	if err != nil {return nil, fmt.Errorf("could not decode block: %w", err)}
-	fsnode, err := unixfs.ExtractFSNode(node)
-	if err != nil {return nil, fmt.Errorf("block is not an FSNode: %w", err)}
-	if fsnode.IsDir() {
-		urlPath = path.Clean("/" + urlPath)
-		fmt.Println("Geting parent of", urlPath)
-		parent := path.Dir(urlPath)
-		builder := new(strings.Builder)
-		if path.Dir(parent) != "/" {
-			builder.WriteString(fmt.Sprintf("<a href='/peer%s'>[PARENT DIRECTORY]</a><br>", path.Dir(urlPath)))
-		}
-		for _, link := range node.Links() {
-			builder.WriteString(fmt.Sprintf("<a href='/peer%s/%s'>%s</a><br>", urlPath, link.Name, link.Name))
-		}
-		return strings.NewReader(builder.String()), nil
-	}
-	fmt.Println("Links:")
-	for _, link := range node.Links() {
-		fmt.Printf("  %v\n", link.Cid)
-	}
-	n, err := ufile.NewUnixfsFile(context.Background(), conf.lite, node)
-	if err != nil {return nil, err}
-	return files.ToFile(n), nil
+	return fmt.Sprintf(format, args...) + "\n" + strings.Join(strings.Split(string(debug.Stack()[2:]), "\n")[5:], "\n")
 }
 
 func httpError(w http.ResponseWriter, errMsg string, code int) error {
 	http.Error(w, errMsg, code)
 	return nil
-}
-
-func handlePeerRequests(encrypted bool) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		urlPath := r.URL.Path[len("/peer/"):]
-		fmt.Println("Peer file:", urlPath)
-		pind := strings.Index(urlPath, "/")
-		peerID, err := peer.Decode(urlPath[0:pind])
-		if err != nil {
-			http.Error(w, errstr("Bad peer id: %s", urlPath[0:pind]), http.StatusNotFound)
-			return
-		}
-		nind := pind + 1 + strings.Index(urlPath[pind+1:], "/")
-		if nind < pind+1 {
-			nind = len(urlPath)
-		}
-		treeName := urlPath[pind+1 : nind]
-		file := path.Clean("/" + urlPath[nind:])
-		if r.Method == http.MethodPut {
-			func() error {
-				if peerID != conf.myHost.ID() {return httpError(w, errstr("Attempt to write a file for a different peer"), http.StatusBadRequest)}
-				t, err := treerequest.GetTree(treeName, conf.myHost.ID())
-				if err != nil {return httpError(w, errstrw("Could not fetch tree", err), http.StatusBadRequest)}
-				block, err := conf.lite.BlockStore().Get(t.Nodes["/"])
-				if err != nil {return httpError(w, errstrw("Could not fetch block for tree", err), http.StatusBadRequest)}
-				node, err := ipld.Decode(block)
-				if err != nil {return httpError(w, errstrw("Could not decode block for tree", err), http.StatusBadRequest)}
-				root, err := NewStorage(node.(*merkledag.ProtoNode), conf.lite)
-				if err != nil {return httpError(w, errstrw("Could not create mfs root for tree", err), http.StatusBadRequest)}
-				buf := bytes.NewBuffer(make([]byte, 0, 1024))
-				_, err = buf.ReadFrom(r.Body)
-				if err != nil {return httpError(w, errstrw("Could not read request body", err), http.StatusBadRequest)}
-				content := buf.Bytes()
-				if encrypted {
-					content, err = encrypt(buf.Bytes())
-					if err != nil {return httpError(w, errstrw("Could not encrypt data", err), http.StatusBadRequest)}
-				}
-				err = StoreFile(root, file, content)
-				if err != nil {return httpError(w, errstr("Could not store %s", file), http.StatusBadRequest)}
-				node, err = root.GetDirectory().GetNode()
-				if err != nil {return httpError(w, errstr("error getting stored directory %s", file), http.StatusBadRequest)}
-				err = treerequest.SetTree(treeName, node.Cid())
-				if err != nil {return httpError(w, errstr("error publishing tree %s", file), http.StatusBadRequest)}
-				fmt.Printf("###\n### New tree: %s\n###\n", node.Cid())
-				w.WriteHeader(200)
-				return nil
-			}()
-			return
-		} else if r.Method != http.MethodGet {
-			http.Error(w, errstr("Only GET and PUT are supported for /peer/"), http.StatusBadRequest)
-			return
-		}
-		fmt.Println("Fetching tree")
-		result := <-treerequest.Fetch(treeName, peerID)
-		if result.Err != nil {
-			http.Error(w, errstr(result.Err.Error()), http.StatusNotFound)
-			return
-		}
-		fmt.Printf("Tree: %v\n", result.Tree)
-		aCid := result.Tree.Nodes[file]
-		if aCid == cid.Undef {
-			http.Error(w, errstr("No file %s for peer %s", file, peerID), http.StatusNotFound)
-			return
-		}
-		fmt.Println("Fetching block for HTTP response:", aCid)
-		block, err := conf.lite.BlockStore().Get(aCid)
-		if err != nil {
-			http.Error(w, errstr("Could not find file %s for peer %s", file, peerID), http.StatusNotFound)
-			return
-		}
-		var ffile io.ReadSeeker
-		ffile, err = getFileForBlock(urlPath, block)
-		if err != nil {
-			http.Error(w, errstrw("Could not decode file %s for peer %s", file, peerID, err), http.StatusNotFound)
-			return
-		}
-		if encrypted {
-			ffile, err = decryptedStream(ffile)
-			if err != nil {
-				http.Error(w, errstrw("Could decrypt file %s for peer %s", file, peerID, err), http.StatusNotFound)
-				return
-			}
-		}
-		fileTime, err := treerequest.TimeForBlock(block.Cid())
-		if err != nil { // couldn't get time, so make it long, long ago
-			fileTime = time.Unix(0, 0)
-		}
-		http.ServeContent(w, r, file, fileTime, ffile)
-	}
-}
-
-func encrypt(content []byte) ([]byte, error) {
-	key, err := crypto.PubKeyToStdKey(peerKey.GetPublic()) // get key, which should be an RSA key
-	if err != nil {return nil, err}
-	rsaKey, ok := key.(*rsa.PublicKey)
-	if !ok {return nil, fmt.Errorf("peer key is not an RSA key")}
-	ciphertext, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, rsaKey, content, []byte("file"))
-	if err != nil {return nil, err}
-	return ciphertext, nil
-}
-
-func decryptedStream(input io.ReadSeeker) (io.ReadSeeker, error) {
-	key, err := crypto.PrivKeyToStdKey(peerKey) // get key, which should be an RSA key
-	if err != nil {return nil, err}
-	rsaKey, ok := key.(*rsa.PrivateKey)
-	if !ok {return nil, fmt.Errorf("peer key is not an RSA key")}
-	buf := bytes.NewBuffer(make([]byte, 0, 16))
-	_, err = buf.ReadFrom(input)
-	if err != nil {return nil, err}
-	plaintext, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, rsaKey, buf.Bytes(), []byte("file"))
-	if err != nil {return nil, err}
-	return bytes.NewReader(plaintext), nil
 }
 
 func validateID(id string) error {
@@ -1281,15 +1197,49 @@ func handleUrlEffect(service string, input func(input string) error) {
 	})
 }
 
-func main() {
+func handlePeerCID(urlPath string) (interface{}, error) {
+	pind := strings.Index(urlPath, "/")
+	peerID, err := peer.Decode(urlPath[0:pind])
+	if err != nil {return nil, fmt.Errorf("Bad peer id: %s", urlPath[0:pind])}
+	nind := pind + 1 + strings.Index(urlPath[pind+1:], "/")
+	if nind < pind+1 {
+		nind = len(urlPath)
+	}
+	treeName := urlPath[pind+1 : nind]
+	file := path.Clean("/" + urlPath[nind:])
+	fmt.Println("Fetching tree")
+	tree, _, err := treerequest.FetchSync(treeName, peerID, false)
+	if err != nil {return nil, fmt.Errorf(err.Error())}
+	fmt.Printf("Tree: %v\n", tree)
+	aCid := tree.Nodes[file]
+	if aCid == cid.Undef {return nil, fmt.Errorf("no tree for %v/%v", peerID, file)}
+	return aCid.String(), nil
+}
 
+func handleUrlJSON(service string, input func(input string) (interface{}, error)) {
+	http.HandleFunc(service, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("Handling %s (%s)\n", r.URL, r.URL.Path[len(service):])
+		value, err := input(r.URL.Path[len(service):])
+		if err != nil {
+			httpError(w, errstr("Could not read request body"), http.StatusBadRequest)
+			return
+		}
+		output, err := json.Marshal(value)
+		if err != nil {
+			httpError(w, errstr("Could not encode result %v", value), http.StatusBadRequest)
+			return
+		}
+		http.ServeContent(w, r, "output.json", time.Now(), bytes.NewReader(output))
+	})
+}
+
+func main() {
 	started = false
 	log.SetFlags(log.Lshortfile)
 	browse := ""
 	nobrowse := false
 	centralRelay = createLibp2pRelay()
 	addr := "localhost"
-
 	port := 8888
 	noBootstrap := false
 	bootstrapArg := addrList([]ma.Multiaddr{})
@@ -1353,8 +1303,7 @@ func main() {
 	fmt.Printf("Listening on port %v\n", port)
 	http.HandleFunc("/libp2p", centralRelay.handleConnection())
 	handleUrlEffect("/peerID/", validateID)
-	http.HandleFunc("/peerEncrypted/", handlePeerRequests(true))
-	http.HandleFunc("/peer/", handlePeerRequests(false))
+	handleUrlJSON("/peerCID/", handlePeerCID)
 	if len(fileList) > 0 {
 		for _, dir := range fileList {
 			fmt.Println("File dir: ", dir)
@@ -1375,7 +1324,10 @@ func main() {
 		http.Handle(urlPrefix, http.StripPrefix(urlPrefix, http.FileServer(FS(false))))
 	}
 	if !nobrowse && browse != "" {
-		browser.OpenURL(fmt.Sprintf("http://localhost:%d/%s", port, browse))
+		err := browser.OpenURL(fmt.Sprintf("http://localhost:%d/%s", port, browse))
+		if err != nil {
+			fmt.Printf("Error: %s", err.Error())
+		}
 	}
 	log.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%d", addr, port), nil))
 

@@ -2,25 +2,18 @@ module github.com/zot/ipfs-p2p-websocket
 
 go 1.14
 
-replace github.com/zot/textcraft-packet => /home/bill/work/p2pmud2-projects/textcraft-packet
-replace github.com/zot/textcraft-treerequest => /home/bill/work/p2pmud2-projects/textcraft-treerequest
-
 require (
-	github.com/AndreasBriese/bbloom v0.0.0-20190825152654-46b345b51c96 // indirect
-	github.com/go-errors/errors v1.0.1
+	github.com/go-errors/errors v1.1.1
 	github.com/gorilla/websocket v1.4.2
 	github.com/hsanjuan/ipfs-lite v1.1.14
-	github.com/ipfs/go-block-format v0.0.2
 	github.com/ipfs/go-cid v0.0.6
 	github.com/ipfs/go-datastore v0.4.4
+	github.com/ipfs/go-ipfs v0.6.0
 	github.com/ipfs/go-ipfs-config v0.8.0
-	github.com/ipfs/go-ipfs-files v0.0.3
-	github.com/ipfs/go-ipld-format v0.2.0
+	github.com/ipfs/go-ipfs-pinner v0.0.4
 	github.com/ipfs/go-log v1.0.4
 	github.com/ipfs/go-log/v2 v2.1.1
-	github.com/ipfs/go-merkledag v0.3.2
-	github.com/ipfs/go-mfs v0.1.2
-	github.com/ipfs/go-unixfs v0.2.4
+	github.com/ipfs/go-path v0.0.7
 	github.com/libp2p/go-libp2p v0.9.6
 	github.com/libp2p/go-libp2p-autonat v0.2.3
 	github.com/libp2p/go-libp2p-connmgr v0.2.4
